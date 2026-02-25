@@ -250,10 +250,15 @@ class ChatServerManager private constructor(private val context: Context) {
                         translations[key] = translation
                         broadcast("translation", translation)
                     },
-                    onUiTranslationReady = { requestId, lang, map ->
-                        uiTranslations[lang] = map
-                        saveUiTranslationsCache()   // persist immediately
-                        broadcast("ui_translations", mapOf("requestId" to requestId, "language" to lang, "translations" to map))
+                    onUiTranslationChunkReady = { lang, chunkMap ->
+                        // Merge this chunk into the existing cache for this language
+                        val merged = (uiTranslations[lang] ?: emptyMap()) + chunkMap
+                        uiTranslations[lang] = merged
+                        saveUiTranslationCache(lang)
+                        broadcast("ui_translations", mapOf(
+                            "language"     to lang,
+                            "translations" to chunkMap,  // send only the new keys
+                        ))
                     },
                 )
 
@@ -270,28 +275,30 @@ class ChatServerManager private constructor(private val context: Context) {
         }
     }
 
-    private val uiTranslationsCacheFile: File by lazy {
-        File(context.filesDir, "ui_translations_cache.json")
-    }
+    private fun uiTranslationCacheFile(language: String): File =
+        File(context.filesDir, "ui_translations_${language}.json")
 
     private fun loadUiTranslationsCache() {
-        try {
-            if (uiTranslationsCacheFile.exists()) {
-                val type = object : com.google.gson.reflect.TypeToken<Map<String, Map<String, String>>>() {}.type
-                val cached: Map<String, Map<String, String>> = gson.fromJson(uiTranslationsCacheFile.readText(), type)
-                uiTranslations.putAll(cached)
-                Log.i(TAG, "Loaded UI translation cache: ${cached.keys}")
+        val type = object : com.google.gson.reflect.TypeToken<Map<String, String>>() {}.type
+        context.filesDir.listFiles { f -> f.name.startsWith("ui_translations_") && f.name.endsWith(".json") }
+            ?.forEach { file ->
+                try {
+                    val lang = file.nameWithoutExtension.removePrefix("ui_translations_")
+                    val cached: Map<String, String> = gson.fromJson(file.readText(), type)
+                    uiTranslations[lang] = cached
+                    Log.i(TAG, "Loaded UI translation cache for $lang: ${cached.size} keys")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to load UI translation cache from ${file.name}", e)
+                }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to load UI translations cache", e)
-        }
     }
 
-    private fun saveUiTranslationsCache() {
+    private fun saveUiTranslationCache(language: String) {
         try {
-            uiTranslationsCacheFile.writeText(gson.toJson(uiTranslations))
+            val map = uiTranslations[language] ?: return
+            uiTranslationCacheFile(language).writeText(gson.toJson(map))
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to save UI translations cache", e)
+            Log.w(TAG, "Failed to save UI translation cache for $language", e)
         }
     }
 
@@ -309,6 +316,40 @@ class ChatServerManager private constructor(private val context: Context) {
             isPending = true,
         )
         broadcast("translation_pending", mapOf("messageId" to messageId, "language" to language))
+    }
+
+    /**
+     * Enqueues LLM translation chunks for any keys in [UI_STRINGS_EN] that are
+     * not yet present in the cache for [language]. Skips chunks whose task key is
+     * already in the translation manager's queue. No-ops for built-in languages.
+     *
+     * @return "builtin" if no LLM work is needed, "cached" if all keys are already
+     *         cached, or "queued" if at least one chunk was submitted.
+     */
+    private fun enqueueUiTranslationIfNeeded(language: String): String {
+        if (language in setOf("en", "ko", "ja")) return "builtin"
+
+        val cached = uiTranslations[language] ?: emptyMap()
+        val allKeys = TranslationManager.UI_STRINGS_EN.keys
+
+        if (cached.keys.containsAll(allKeys)) return "cached"
+
+        val uncachedEntries = TranslationManager.UI_STRINGS_EN.filterKeys { it !in cached }
+        val chunks = if (cached.isEmpty()) {
+            TranslationManager.STRING_CHUNKS
+        } else {
+            TranslationManager.buildChunks(uncachedEntries)
+        }
+
+        chunks.forEachIndexed { index, chunk ->
+            val task = TranslationTask.UiTranslationTask(
+                language   = language,
+                chunkIndex = index,
+                chunk      = chunk,
+            )
+            translationManager?.enqueue(task)
+        }
+        return if (cached.isNotEmpty()) "cached" else "queued"
     }
 
     private fun queueTranslationForAllLanguages(message: ChatMessage) {
@@ -391,14 +432,26 @@ class ChatServerManager private constructor(private val context: Context) {
 
             try {
                 // Send current state to this new tab.
-                val initPayload = gson.toJson(mapOf(
-                    "type" to "init",
-                    "userId" to userId,
-                    "users" to users.values.toList(),
-                    "messages" to synchronized(messages) { messages.toList() },
-                    "translations" to translations.values.toList(),
-                    "uiTranslations" to uiTranslations,
-                ))
+                val initPayload = gson.toJson(buildMap {
+                    put("type", "init")
+                    put("userId", userId)
+                    put("users", users.values.toList())
+                    put("messages", synchronized(messages) { messages.toList() })
+                    put("translations", translations.values.toList())
+
+                    val userLanguage = users[userId]?.language ?: "en"
+                    
+                    // Skip sending pre-translated languages (en, ja, ko) completely.
+                    // Otherwise, only send the specific translations for the user's language.
+                    if (userLanguage !in listOf("en", "ja", "ko")) {
+                        uiTranslations[userLanguage]?.let { langTranslations ->
+                            put("uiTranslations", mapOf(
+                                "language" to userLanguage,
+                                "translations" to langTranslations
+                            ))
+                        }
+                    }
+                })
                 send(ServerSentEvent(data = initPayload))
 
                 // Broadcast subsequent events; swallow individual send errors so
@@ -422,21 +475,21 @@ class ChatServerManager private constructor(private val context: Context) {
             try {
                 val body = gson.fromJson(call.receiveText(), Map::class.java)
                 val language = body["language"] as? String ?: return@post call.respond(HttpStatusCode.BadRequest)
-                if (!setOf("en", "ko", "ja").contains(language)) {
-                    val cached = uiTranslations[language]
-                    if (cached != null) {
-                        // Already cached — will be sent via SSE init when user connects
-                        call.respondText(
-                            gson.toJson(mapOf("status" to "cached", "translations" to cached)),
-                            ContentType.Application.Json,
-                        )
-                    } else {
-                        val requestId = java.util.UUID.randomUUID().toString()
-                        translationManager?.enqueue(TranslationTask.UiTranslationTask(language, requestId))
-                        call.respond(HttpStatusCode.OK, mapOf("status" to "queued"))
-                    }
+
+                val status = enqueueUiTranslationIfNeeded(language)
+
+                if (status == "cached") {
+                    // At least some keys already cached; send them immediately so the client
+                    // doesn't have to wait for an SSE event.
+                    call.respondText(
+                        gson.toJson(mapOf(
+                            "status"       to "cached",
+                            "translations" to uiTranslations[language],
+                        )),
+                        ContentType.Application.Json,
+                    )
                 } else {
-                    call.respond(HttpStatusCode.OK, mapOf("status" to "builtin"))
+                    call.respond(HttpStatusCode.OK, mapOf("status" to status))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "request-ui-translation error", e)
@@ -484,22 +537,7 @@ class ChatServerManager private constructor(private val context: Context) {
                     broadcast("user_updated", user)
                 }
 
-                // Belt-and-suspenders: if UI translation is already cached for this language,
-                // broadcast it directly to the joining user so they don't miss it due to
-                // SSE/join timing races.
-                if (!setOf("en", "ko", "ja").contains(language)) {
-                    val cached = uiTranslations[language]
-                    if (cached != null) {
-                        broadcast("ui_translations", mapOf(
-                            "requestId" to "cached",
-                            "language" to language,
-                            "translations" to cached,
-                        ))
-                    } else {
-                        val requestId = java.util.UUID.randomUUID().toString()
-                        translationManager?.enqueue(TranslationTask.UiTranslationTask(language, requestId))
-                    }
-                }
+                enqueueUiTranslationIfNeeded(language)
 
                 call.respond(HttpStatusCode.OK, mapOf("ok" to true))
             } catch (e: Exception) {

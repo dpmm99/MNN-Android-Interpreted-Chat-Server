@@ -35,7 +35,7 @@ data class InferenceDebugState(
 class TranslationManager(
     private val llmSession: LlmSession,
     private val onTranslationReady: suspend (messageId: String, language: String, text: String, retranslationCount: Int, previousVersions: List<String>) -> Unit,
-    private val onUiTranslationReady: suspend (requestId: String, language: String, translations: Map<String, String>) -> Unit,
+    private val onUiTranslationChunkReady: suspend (language: String, translations: Map<String, String>) -> Unit,
 ) {
     private val queue = PriorityBlockingQueue<TranslationTask>()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -49,12 +49,16 @@ class TranslationManager(
         scope.launch { processQueue() }
     }
 
-    fun enqueue(task: TranslationTask) {
-        synchronized(enqueuedKeys) {
+    fun enqueue(task: TranslationTask): Boolean {
+        val added = synchronized(enqueuedKeys) {
             if (enqueuedKeys.add(task.key)) {
                 queue.offer(task)
+                true
+            } else {
+                false
             }
         }
+        return added
     }
 
     fun stop() {
@@ -84,7 +88,7 @@ class TranslationManager(
     private suspend fun processTask(task: TranslationTask) {
         when (task) {
             is TranslationTask.MessageTranslationTask -> translateMessage(task)
-            is TranslationTask.UiTranslationTask -> translateUi(task)
+            is TranslationTask.UiTranslationTask -> translateUiChunk(task)
             is TranslationTask.HistoryTranslationTask -> {
                 // Reuse MessageTranslationTask logic
                 translateMessage(
@@ -216,13 +220,13 @@ class TranslationManager(
         }
     }
 
-    /** Translate a batch of UI strings to the given language. */
-    private suspend fun translateUi(task: TranslationTask.UiTranslationTask) {
+/** Translate a single chunk of UI strings to the given language. */
+    private suspend fun translateUiChunk(task: TranslationTask.UiTranslationTask) {
         val session = llmSession
         session.setKeepHistory(false)
 
         val languageName = languageNameFor(task.language)
-        val uiStrings = UI_STRINGS_EN.entries.joinToString("\n") { (k, v) -> "$k: $v" }
+        val uiStrings = task.chunk.entries.joinToString("\n") { (k, v) -> "$k: $v" }
         val prompt = """Translate each UI string to $languageName for a chat application. 
 Output ONLY a JSON object with the same keys and translated values. No other text.
 Input:
@@ -283,7 +287,7 @@ $uiStrings"""
                 }
             })
         } catch (e: Exception) {
-            Log.e(TAG, "UI translation failed for ${task.language}", e)
+            Log.e(TAG, "UI translation failed for ${task.language} chunk ${task.chunkIndex}", e)
             // Preserve prompt + partial output but mark idle
             _debugFlow.value = InferenceDebugState(
                 prompt = prompt,
@@ -335,10 +339,10 @@ $uiStrings"""
 
             val map = com.google.gson.Gson()
                 .fromJson<Map<String, String>>(cleanedJsonStr, object : com.google.gson.reflect.TypeToken<Map<String, String>>() {}.type)
-            Log.d(TAG, "UI translation parsed successfully: ${map.size} keys")
-            onUiTranslationReady(task.requestId, task.language, map)
+            Log.d(TAG, "UI chunk translation parsed successfully: ${map.size} keys for ${task.language} chunk ${task.chunkIndex}")
+            onUiTranslationChunkReady(task.language, map)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse UI translations for ${task.language}", e)
+            Log.e(TAG, "Failed to parse UI translations for ${task.language} chunk ${task.chunkIndex}", e)
             //TODO: Handle by using English until the app restarts, to avoid wasting power retrying repeatedly.
         }
     }
@@ -382,7 +386,79 @@ $uiStrings"""
             "no_messages" to "No messages yet. Say hello!",
             "ctx_view_latest" to "View latest translation",
             "ctx_copy_message" to "Copy message",
+            "qc_title" to "Quick chat",
+            "qc_cat_conversation" to "Conversation",
+            "qc_cat_about_you" to "About You",
+            "qc_cat_right_here" to "Right Here",
+            "qc_cat_common_ground" to "Common Ground",
+            "qc_cat_spend_time" to "Spend Time",
+            "qc_cat_wrapping_up" to "Wrapping Up",
+            "qc_translation_unclear"   to "Can you explain that? The translation was unclear.",
+            "qc_say_more_simply"       to "Could you say that more simply?",
+            "qc_slow_down"             to "Can we slow down a little?",
+            "qc_still_learning"        to "I am still learning this language, please be patient.",
+            "qc_what_language_prefer"  to "What language are you most comfortable in?",
+            "qc_did_not_understand"    to "I did not understand that last message.",
+            "qc_where_are_you_from"    to "Where are you from originally?",
+            "qc_where_do_you_live"     to "Where do you live now?",
+            "qc_how_long_been_here"    to "How long have you been here?",
+            "qc_visiting_or_local"     to "Are you visiting or do you live here?",
+            "qc_what_do_for_work"      to "What do you do for work?",
+            "qc_what_are_hobbies"      to "What are your hobbies?",
+            "qc_have_you_traveled"     to "Have you traveled much?",
+            "qc_what_brings_you_here"  to "What brings you here today?",
+            "qc_first_time_here"       to "Is this your first time here?",
+            "qc_how_did_you_hear"      to "How did you hear about this place?",
+            "qc_here_alone_friends"    to "Are you here alone or with friends?",
+            "qc_how_long_staying"      to "How long are you staying?",
+            "qc_what_think_of_place"   to "What do you think of this place?",
+            "qc_do_you_know_anyone"    to "Do you know anyone else here?",
+            "qc_what_music_like"       to "What kind of music do you like?",
+            "qc_what_do_weekends"      to "What do you like to do on weekends?",
+            "qc_what_passionate_about" to "What are you passionate about?",
+            "qc_what_are_you_reading"  to "What have you been reading or watching lately?",
+            "qc_want_grab_drink"       to "Would you like to get a drink together?",
+            "qc_want_grab_food"        to "Would you like to get something to eat?",
+            "qc_want_keep_walking"     to "Do you want to keep walking together?",
+            "qc_want_join_group"       to "Would you like to join our group?",
+            "qc_know_good_place_nearby" to "Do you know a good place nearby?",
+            "qc_nice_meeting_you"      to "It was really nice meeting you.",
+            "qc_talk_again_later"      to "Let us talk again later.",
+            "qc_hope_meet_again"       to "I hope we run into each other again.",
+            "qc_get_contact_info"      to "Can I get your contact information?",
+            "qc_have_great_day"        to "Have a great rest of your day.",
         )
+
+        /**
+         * Computes chunks of the given list of key-label maps.
+         * Each chunk accumulates entries until the combined key+value character count exceeds 250.
+         * This is just a rough way of trying to optimize performance (not too long due to quadratic
+         * attention, but not too short due to repeat processing of the instruction part of the prompt).
+         */
+        fun buildChunks(entries: Map<String, String>): List<Map<String, String>> {
+            val chunks = mutableListOf<Map<String, String>>()
+            var current = mutableMapOf<String, String>()
+            var currentLen = 0
+            for ((k, v) in entries) {
+                val entryLen = k.length + v.length
+                current[k] = v
+                currentLen += entryLen
+                if (currentLen > 250) {
+                    chunks.add(current)
+                    current = mutableMapOf()
+                    currentLen = 0
+                }
+            }
+            if (current.isNotEmpty()) chunks.add(current)
+            return chunks
+        }
+
+        /**
+         * Pre-computed chunks of [UI_STRINGS_EN].
+         */
+        val STRING_CHUNKS: List<Map<String, String>> by lazy {
+            buildChunks(UI_STRINGS_EN)
+        }
 
         val UI_STRINGS_KO = mapOf(
             "chat_title" to "채팅",
@@ -413,6 +489,47 @@ $uiStrings"""
             "no_messages" to "아직 메시지가 없습니다.",
             "ctx_view_latest" to "최신 번역 보기",
             "ctx_copy_message" to "메시지 복사",
+            "qc_title" to "퀵 채팅",
+            "qc_cat_conversation" to "대화",
+            "qc_cat_about_you" to "당신에 대해",
+            "qc_cat_right_here" to "바로 여기",
+            "qc_cat_common_ground" to "공통점",
+            "qc_cat_spend_time" to "함께 시간 보내기",
+            "qc_cat_wrapping_up" to "마무리",
+            "qc_translation_unclear"    to "그게 무슨 뜻인지 설명해 주실 수 있나요? 번역이 불분명했습니다.",
+            "qc_say_more_simply"        to "좀 더 간단하게 말씀해 주실 수 있나요?",
+            "qc_slow_down"              to "조금 천천히 얘기할 수 있을까요?",
+            "qc_still_learning"         to "저는 이 언어를 아직 배우고 있어요. 양해해 주세요.",
+            "qc_what_language_prefer"   to "어떤 언어가 가장 편하신가요?",
+            "qc_did_not_understand"     to "방금 메시지를 이해하지 못했습니다.",
+            "qc_where_are_you_from"     to "원래 어디 출신이세요?",
+            "qc_where_do_you_live"      to "지금은 어디에 사세요?",
+            "qc_how_long_been_here"     to "여기 오신 지 얼마나 되셨나요?",
+            "qc_visiting_or_local"      to "방문 중이세요, 아니면 여기 사세요?",
+            "qc_what_do_for_work"       to "어떤 일을 하세요?",
+            "qc_what_are_hobbies"       to "취미가 뭔가요?",
+            "qc_have_you_traveled"      to "여행을 많이 다니셨나요?",
+            "qc_what_brings_you_here"   to "오늘 여기는 어떤 일로 오셨나요?",
+            "qc_first_time_here"        to "여기 처음 오셨나요?",
+            "qc_how_did_you_hear"       to "이곳을 어떻게 알게 되셨나요?",
+            "qc_here_alone_friends"     to "혼자 오셨나요, 아니면 친구들과 함께 오셨나요?",
+            "qc_how_long_staying"       to "얼마나 계실 예정인가요?",
+            "qc_what_think_of_place"    to "이 장소가 어떤 것 같으세요?",
+            "qc_do_you_know_anyone"     to "여기서 아는 분이 있으신가요?",
+            "qc_what_music_like"        to "어떤 음악을 좋아하세요?",
+            "qc_what_do_weekends"       to "주말에 주로 뭐 하시나요?",
+            "qc_what_passionate_about"  to "어떤 것에 열정을 느끼시나요?",
+            "qc_what_are_you_reading"   to "최근에 무엇을 읽거나 보고 계신가요?",
+            "qc_want_grab_drink"        to "같이 음료 한잔 하실래요?",
+            "qc_want_grab_food"         to "같이 뭔가 드실래요?",
+            "qc_want_keep_walking"      to "같이 계속 걸을까요?",
+            "qc_want_join_group"        to "저희 그룹에 합류하실래요?",
+            "qc_know_good_place_nearby" to "근처에 좋은 곳 알고 계신가요?",
+            "qc_nice_meeting_you"       to "만나서 정말 반가웠어요.",
+            "qc_talk_again_later"       to "나중에 다시 얘기해요.",
+            "qc_hope_meet_again"        to "또 다시 만날 수 있으면 좋겠어요.",
+            "qc_get_contact_info"       to "연락처를 알 수 있을까요?",
+            "qc_have_great_day"         to "남은 하루도 좋은 하루 되세요.",
         )
 
         val UI_STRINGS_JA = mapOf(
@@ -444,6 +561,47 @@ $uiStrings"""
             "no_messages" to "まだメッセージはありません。",
             "ctx_view_latest" to "最新の翻訳を表示",
             "ctx_copy_message" to "メッセージをコピー",
+            "qc_title" to "クイックチャット",
+            "qc_cat_conversation" to "会話",
+            "qc_cat_about_you" to "あなたについて",
+            "qc_cat_right_here" to "今ここで",
+            "qc_cat_common_ground" to "共通の話題",
+            "qc_cat_spend_time" to "一緒に過ごす",
+            "qc_cat_wrapping_up" to "締めくくり",
+            "qc_translation_unclear"    to "どういう意味ですか？翻訳がわかりにくかったです。",
+            "qc_say_more_simply"        to "もっとシンプルに言っていただけますか？",
+            "qc_slow_down"              to "少しゆっくり話せますか？",
+            "qc_still_learning"         to "この言語をまだ勉強中です。ご辛抱ください。",
+            "qc_what_language_prefer"   to "一番使いやすい言語はどれですか？",
+            "qc_did_not_understand"     to "さきほどのメッセージが理解できませんでした。",
+            "qc_where_are_you_from"     to "もともとどちらのご出身ですか？",
+            "qc_where_do_you_live"      to "今はどこに住んでいますか？",
+            "qc_how_long_been_here"     to "こちらに来てどのくらいになりますか？",
+            "qc_visiting_or_local"      to "旅行中ですか、それともここに住んでいますか？",
+            "qc_what_do_for_work"       to "どのようなお仕事をしていますか？",
+            "qc_what_are_hobbies"       to "趣味は何ですか？",
+            "qc_have_you_traveled"      to "旅行はよくされますか？",
+            "qc_what_brings_you_here"   to "今日はどういったご用件でいらっしゃいましたか？",
+            "qc_first_time_here"        to "ここに来るのは初めてですか？",
+            "qc_how_did_you_hear"       to "こちらをどうやって知りましたか？",
+            "qc_here_alone_friends"     to "おひとりですか、それともお友達と一緒ですか？",
+            "qc_how_long_staying"       to "どのくらい滞在される予定ですか？",
+            "qc_what_think_of_place"    to "この場所はいかがですか？",
+            "qc_do_you_know_anyone"     to "ここで知っている方はいますか？",
+            "qc_what_music_like"        to "どんな音楽が好きですか？",
+            "qc_what_do_weekends"       to "週末は何をするのが好きですか？",
+            "qc_what_passionate_about"  to "何に情熱を感じますか？",
+            "qc_what_are_you_reading"   to "最近、何を読んだり観たりしていますか？",
+            "qc_want_grab_drink"        to "一緒に飲みに行きませんか？",
+            "qc_want_grab_food"         to "一緒に何か食べませんか？",
+            "qc_want_keep_walking"      to "一緒にもう少し歩きませんか？",
+            "qc_want_join_group"        to "私たちのグループに加わりませんか？",
+            "qc_know_good_place_nearby" to "近くに良い場所を知っていますか？",
+            "qc_nice_meeting_you"       to "お会いできて本当によかったです。",
+            "qc_talk_again_later"       to "また後で話しましょう。",
+            "qc_hope_meet_again"        to "またどこかでお会いできると嬉しいです。",
+            "qc_get_contact_info"       to "連絡先を教えていただけますか？",
+            "qc_have_great_day"         to "残りの一日も良い一日をお過ごしください。",
         )
     }
 }

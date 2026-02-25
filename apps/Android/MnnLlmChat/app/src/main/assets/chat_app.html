@@ -9,6 +9,7 @@
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#1a1a2e;height:100dvh;overflow:hidden;display:flex;flex-direction:column}
 .screen{display:none;flex-direction:column;height:100dvh;overflow-y:auto}
 .screen.active{display:flex}
+.ui-translating-banner{width:100%;text-align:center;font-size:.9em;color:#888;font-style:italic;min-height:1.4em;}
 /* Language screen */
 #screen-lang{align-items:center;justify-content:center;gap:16px;padding:24px;background:#f0f2f5}
 .lang-title{font-size:1.4em;font-weight:700;text-align:center;margin-bottom:8px}
@@ -92,6 +93,77 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 /* Overlay */
 #overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:800}
 #overlay.open{display:block}
+
+/* ── Quick-chat sheet ──────────────────────────────────────────────────────── */
+/* Backdrop (behind sheet, above chat, below ctx-menu) */
+#qc-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:850;touch-action:none}
+#qc-backdrop.open{display:block}
+
+/* Sheet container — slides up from bottom */
+#qc-sheet{
+  position:fixed;left:0;right:0;bottom:0;
+  background:#fff;
+  border-radius:20px 20px 0 0;
+  box-shadow:0 -4px 32px rgba(0,0,0,.16);
+  z-index:860;
+  max-height:70dvh;
+  display:flex;flex-direction:column;
+  transform:translateY(100%);
+  transition:transform .28s cubic-bezier(.4,0,.2,1);
+  overflow:hidden;
+}
+#qc-sheet.open{transform:translateY(0)}
+
+/* Drag handle */
+.qc-handle{width:40px;height:4px;background:#dde;border-radius:2px;margin:10px auto 4px;flex-shrink:0}
+
+/* Header row */
+.qc-header{
+  display:flex;align-items:center;
+  padding:6px 16px 10px;
+  border-bottom:1px solid #f0f2f5;
+  flex-shrink:0;gap:8px;
+}
+.qc-back{
+  background:none;border:none;cursor:pointer;
+  font-size:1.1em;padding:6px;border-radius:8px;
+  color:#4252b6;display:none;align-items:center;
+}
+.qc-back.visible{display:flex}
+.qc-back:active{background:#f0f2f5}
+.qc-title{font-size:1em;font-weight:700;flex:1;color:#1a1a2e}
+.qc-close{
+  background:none;border:none;cursor:pointer;
+  font-size:1.1em;padding:6px;border-radius:8px;color:#888;
+  display:flex;align-items:center;
+}
+.qc-close:active{background:#f0f2f5}
+
+/* Scrollable list */
+.qc-list{overflow-y:auto;flex:1;padding:4px 0 12px; -webkit-overflow-scrolling: touch;}
+
+/* Category and message items */
+.qc-item{
+  display:flex;align-items:center;
+  padding:14px 20px;
+  cursor:pointer;
+  border-bottom:1px solid #f7f8fc;
+  gap:12px;
+  transition:background .1s;
+}
+.qc-item:active{background:#f0f2f5}
+.qc-item-icon{font-size:1.25em;flex-shrink:0;width:28px;text-align:center}
+.qc-item-text{flex:1;font-size:.97em;line-height:1.4;color:#1a1a2e}
+.qc-item-arrow{font-size:.85em;color:#bbb}
+
+/* Quick-chat trigger button in input area */
+#qc-btn{
+  background:none;border:none;cursor:pointer;
+  padding:6px;border-radius:8px;
+  font-size:1.3em;color:#888;
+  display:flex;align-items:center;flex-shrink:0;
+}
+#qc-btn:active{background:#f0f2f5}
 </style>
 </head>
 <body>
@@ -129,7 +201,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
 <!-- ─── Screen 2: Setup ───────────────────────────────────────────────────── -->
 <div id="screen-setup" class="screen">
-  <div id="ui-translating-banner" style="width:100%;max-width:400px;text-align:center;font-size:.9em;color:#888;font-style:italic;min-height:1.4em;display:none"></div>
+  <div class="ui-translating-banner" data-scope="setup" style="max-width:400px;display:none"></div>
   <div style="font-size:1.5em;font-weight:800;text-align:center;margin-bottom:4px">💬</div>
   <div class="setup-section">
     <div class="setup-label" id="txt-setup-username">Choose a username</div>
@@ -151,6 +223,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <!-- ─── Screen 3: Chat ────────────────────────────────────────────────────── -->
 <div id="screen-chat" class="screen">
   <div class="chat-header">
+    <div class="ui-translating-banner" data-scope="chat" style="max-width:400px;display:none"></div>
     <h1 id="txt-chat-title">💬 Chat</h1>
     <span class="header-users" id="header-users-btn" onclick="toggleUsersPanel()">👥 1</span>
     <button class="btn-icon" id="btn-export" title="Export" onclick="exportChat()">💾</button>
@@ -162,15 +235,30 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <button class="btn-icon" onclick="cancelReply()">✕</button>
   </div>
   <div class="input-area">
+    <button id="qc-btn" onclick="openQcSheet()" title="Quick chat">💬</button>
     <textarea id="msg-input" rows="1" placeholder="Type a message…"></textarea>
     <button id="send-btn" onclick="sendMessage()">➤</button>
   </div>
+</div>
+
+<!-- ─── Quick-chat sheet ───────────────────────────────────────────────────── -->
+<div id="qc-backdrop" onclick="closeQcSheet()"></div>
+<div id="qc-sheet" role="dialog" aria-modal="true">
+  <div class="qc-handle"></div>
+  <div class="qc-header">
+    <div class="ui-translating-banner" data-scope="qc" style="display:none"></div>
+    <button class="qc-back" id="qc-back-btn" onclick="qcBack()" aria-label="Back">‹</button>
+    <div class="qc-title" id="qc-title-text">Quick chat</div>
+    <button class="qc-close" onclick="closeQcSheet()" aria-label="Close">✕</button>
+  </div>
+  <div class="qc-list" id="qc-list"></div>
 </div>
 
 <!-- ─── Overlays ──────────────────────────────────────────────────────────── -->
 <div id="overlay" onclick="closeAll()"></div>
 
 <div id="ctx-menu">
+  <div class="ui-translating-banner" data-scope="ctx" style="display:none"></div>
   <div class="ctx-item" id="ctx-reply" onclick="ctxReply()">↩ Reply</div>
   <div class="ctx-item" id="ctx-copy" onclick="ctxCopy()">📋 Copy message</div>
   <div class="ctx-item" id="ctx-view-original" onclick="ctxViewOriginal()" style="display:none">🔤 View original</div>
@@ -180,6 +268,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 </div>
 
 <div id="users-panel">
+  <div class="ui-translating-banner" data-scope="users" style="display:none"></div>
   <div class="users-title" id="txt-connected-users">Connected users</div>
   <div id="users-list"></div>
 </div>
@@ -212,6 +301,17 @@ let uiStrings = Object.assign(
   { en: {}, ko: {}, ja: {} },
   window.__BUILTIN_UI_STRINGS__ || {}
 );
+
+// ─── Merge incoming UI translation chunk without wiping existing keys ─────────
+// Rules:
+//   • If the lang object doesn't exist yet, create it.
+//   • For each incoming key, overwrite whatever was there (allows correction).
+//   • Keys NOT present in the incoming chunk are left untouched.
+function mergeUiTranslations(lang, chunk) {
+  if (!uiStrings[lang]) uiStrings[lang] = {};
+  // Object.assign does a shallow merge — incoming keys win, absent keys survive.
+  Object.assign(uiStrings[lang], chunk);
+}
 
 // Rapidly cycle three visible language-related UI texts through as many pre-translated values as possible, from most to least common language.
 const _rotatingLangTitles = [
@@ -400,40 +500,68 @@ function applyUiLang(lang) {
   myLanguage = lang;
   const src = (uiStrings[lang] || uiStrings.en);
   if (src) {
-    Object.keys(src).forEach(k=>{
-      // preserve any existing UI value that came from server (not equal to builtin en)
-      const enVal = uiStrings.en && uiStrings.en[k];
-      if (UI[k] === undefined || UI[k] === enVal) {
-        UI[k] = src[k];
-      }
+    Object.keys(src).forEach(k => {
+      // Always overwrite; incoming translation wins (allows corrections).
+      // "Partial chunk" safety is handled by mergeUiTranslations upstream;
+      // by the time we reach here, uiStrings[lang] already has only the keys
+      // that have actually been translated, so we never accidentally blank a key.
+      UI[k] = src[k];
     });
+    // Ensure fallback: any key still missing from UI gets the English value.
+    const en = uiStrings.en || {};
+    Object.keys(en).forEach(k => { if (UI[k] === undefined) UI[k] = en[k]; });
   }
-  document.getElementById('txt-lang-title').textContent = t('lang_title');
+
+  // Language screen
+  const langTitleEl = document.getElementById('txt-lang-title');
+  if (langTitleEl) langTitleEl.textContent = t('lang_title');
+
   // chat title (in header)
   const chatTitleEl = document.getElementById('txt-chat-title');
   if (chatTitleEl) chatTitleEl.textContent = '💬 ' + t('chat_title');
-  document.getElementById('txt-setup-username').textContent = t('setup_username');
+
+  // setup screen
+  const setupUsernameEl = document.getElementById('txt-setup-username');
+  if (setupUsernameEl) setupUsernameEl.textContent = t('setup_username');
   const uhi = document.getElementById('username-input');
-  if(uhi) uhi.placeholder = t('setup_username_hint');
-  document.getElementById('txt-setup-avatar').textContent = t('setup_avatar');
-  document.getElementById('txt-choose-photo').textContent = t('btn_choose_photo');
-  document.getElementById('txt-btn-join').textContent = t('btn_join');
+  if (uhi) uhi.placeholder = t('setup_username_hint');
+  const setupAvatarEl = document.getElementById('txt-setup-avatar');
+  if (setupAvatarEl) setupAvatarEl.textContent = t('setup_avatar');
+  const choosePhotoEl = document.getElementById('txt-choose-photo');
+  if (choosePhotoEl) choosePhotoEl.textContent = t('btn_choose_photo');
+  const btnJoinEl = document.getElementById('txt-btn-join');
+  if (btnJoinEl) btnJoinEl.textContent = t('btn_join');
+
   // lang-custom placeholder + next button text
   const lc = document.getElementById('lang-custom');
   if (lc) lc.placeholder = t('lang_other_placeholder') || lc.placeholder;
   const btnNext = document.getElementById('btn-lang-next');
   if (btnNext) btnNext.textContent = t('btn_next') || btnNext.textContent;
+
+  // chat screen pieces that might already be visible
   const mi = document.getElementById('msg-input');
-  if(mi) mi.placeholder = t('chat_placeholder');
-  document.getElementById('txt-connected-users').textContent = t('connected_users');
-  document.getElementById('ctx-reply').textContent = '↩ ' + t('ctx_reply');
-  // copy menu item
+  if (mi) mi.placeholder = t('chat_placeholder');
+  const connectedUsersEl = document.getElementById('txt-connected-users');
+  if (connectedUsersEl) connectedUsersEl.textContent = t('connected_users');
+
+  // context menu
   const copyEl = document.getElementById('ctx-copy');
   if (copyEl) copyEl.textContent = '📋 ' + t('ctx_copy_message');
-  document.getElementById('ctx-view-original').textContent = '🔤 ' + t('ctx_view_original');
-  document.getElementById('ctx-view-translation').textContent = '🌐 ' + t('ctx_view_translation');
-  document.getElementById('ctx-retranslate').textContent = '🔄 ' + t('ctx_retranslate');
-  document.getElementById('ctx-prev-translation').textContent = '🕒 ' + t('ctx_prev_translation');
+  const viewOrigEl = document.getElementById('ctx-view-original');
+  if (viewOrigEl) viewOrigEl.textContent = '🔤 ' + t('ctx_view_original');
+  const viewTrEl = document.getElementById('ctx-view-translation');
+  if (viewTrEl) viewTrEl.textContent = '🌐 ' + t('ctx_view_translation');
+  const retranslateEl = document.getElementById('ctx-retranslate');
+  if (retranslateEl) retranslateEl.textContent = '🔄 ' + t('ctx_retranslate');
+  const prevTrEl = document.getElementById('ctx-prev-translation');
+  if (prevTrEl) prevTrEl.textContent = '🕒 ' + t('ctx_prev_translation');
+  const ctxReplyEl = document.getElementById('ctx-reply');
+  if (ctxReplyEl) ctxReplyEl.textContent = '↩ ' + t('ctx_reply');
+
+  // Quick-chat UI
+  refreshQcUi();
+
+//TODO: if necessary pieces are in the right language *for current screen*, hide "UI translating..." banner *for current screen*
   hideUiTranslatingBanner(); // hide once real translation is applied
 }
 
@@ -493,42 +621,37 @@ function genId() { return Math.random().toString(36).slice(2)+Date.now().toStrin
   }
 })();
 
-// Shared helper: restore state from a known ChatUser and jump straight to chat.
-function autoLogin(user) {
+// Shared helper: restore state from a known ChatUser and jump straight to chat. Awaiting is not necesary.
+async function autoLogin(user) {
   myUsername      = user.username;
   myLanguage      = user.language || 'en';
   myAvatarBase64  = user.avatarBase64 || null;
   users[myUserId] = user;
-  applyUiLangSilent(myLanguage);
+  applyUiLang(myLanguage);
+  requestUiTranslation(myLanguage); // UI translations are probably already prepared or enqueued, but just in case, no harm in requesting it again.
   showScreen('screen-chat');
   connectSSE();
   fetchHistory().catch(e => console.error('fetchHistory (auto-login) failed', e));
 }
 
-// applyUiLang without switching screens (used during auto-login).
-function applyUiLangSilent(lang) {
-  myLanguage = lang;
-  const src = (uiStrings[lang] || uiStrings.en);
-  if (src) {
-    Object.keys(src).forEach(k=>{
-      const enVal = uiStrings.en && uiStrings.en[k];
-      if (UI[k] === undefined || UI[k] === enVal) {
-        UI[k] = src[k];
+// Trigger UI translation immediately for non-builtin languages. No need to await.
+async function requestUiTranslation(lang) {
+  const builtinLangs = new Set(['en', 'ko', 'ja']);
+  if (!builtinLangs.has(lang)) {
+    showUiTranslatingBanner();
+    try {
+      const res = await postApi('/api/request-ui-translation', { language: lang });
+      if (res && res.ok) {
+        const json = await res.json();
+        if (json.translations && typeof json.translations === 'object') {
+          mergeUiTranslations(lang, json.translations);
+          applyUiLang(lang);
+        }
       }
-    });
+    } catch (e) {
+      console.warn('request-ui-translation failed', e);
+    }
   }
-  // Update elements that exist in the chat screen too.
-  const mi = document.getElementById('msg-input');
-  if (mi) mi.placeholder = t('chat_placeholder');
-  document.getElementById('txt-connected-users').textContent = t('connected_users');
-  document.getElementById('ctx-reply').textContent = '↩ ' + t('ctx_reply');
-  const copyEl = document.getElementById('ctx-copy');
-  if (copyEl) copyEl.textContent = '📋 ' + t('ctx_copy_message');
-  document.getElementById('ctx-view-original').textContent = '🔤 ' + t('ctx_view_original');
-  document.getElementById('ctx-view-translation').textContent = '🌐 ' + t('ctx_view_translation');
-  document.getElementById('ctx-retranslate').textContent = '🔄 ' + t('ctx_retranslate');
-  document.getElementById('ctx-prev-translation').textContent = '🕒 ' + t('ctx_prev_translation');
-  document.getElementById('txt-chat-title').textContent = '💬 ' + t('chat_title');
 }
 
 // ─── Language screen ─────────────────────────────────────────────────────────
@@ -552,24 +675,7 @@ function initLangScreen() {
     applyUiLang(lang);
     showScreen('screen-setup');
     connectSSE(); // Ensure translation arrives on this screen when it's ready
-
-    // Trigger UI translation immediately for non-builtin languages
-    const builtinLangs = new Set(['en', 'ko', 'ja']);
-    if (!builtinLangs.has(lang)) {
-      showUiTranslatingBanner();
-      try {
-        const res = await postApi('/api/request-ui-translation', { language: lang });
-        if (res && res.ok) {
-          const json = await res.json();
-          if (json.translations && typeof json.translations === 'object') {
-            uiStrings[lang] = Object.assign(uiStrings[lang] || {}, json.translations);
-            applyUiLang(lang);
-          }
-        }
-      } catch (e) {
-        console.warn('request-ui-translation failed', e);
-      }
-    }
+    requestUiTranslation(lang);
   });
 
   showScreen('screen-lang');
@@ -577,16 +683,63 @@ function initLangScreen() {
   startUiCycler(700);
 }
 
-function showUiTranslatingBanner() {
-  const el = document.getElementById('ui-translating-banner');
-  if (!el) return;
-  el.textContent = _translatingUIByLang[myLanguage] || _translatingUIByLang.en;
-  el.style.display = '';
+function showUiTranslatingBanner(scope) {
+  // Show either a single scope banner or all banners if no scope given.
+  const text = _translatingUIByLang[myLanguage] || _translatingUIByLang.en;
+  if (scope) {
+    const el = document.querySelector(`.ui-translating-banner[data-scope="${scope}"]`);
+    if (el) { el.textContent = text; el.style.display = ''; }
+    return;
+  }
+  document.querySelectorAll('.ui-translating-banner').forEach(el => {
+    el.textContent = text;
+    el.style.display = '';
+  });
 }
 
+// Hide per-scope translating banners only when the scope's
+// expected UI keys are present in the server-provided chunk for myLanguage.
 function hideUiTranslatingBanner() {
-  const el = document.getElementById('ui-translating-banner');
-  if (el) el.style.display = 'none';
+  const lang = myLanguage || 'en';
+
+  // Helper: true if uiStrings[lang] contains this key (meaning the server provided it).
+  function hasServerKey(key) {
+    return !!(uiStrings[lang] && Object.prototype.hasOwnProperty.call(uiStrings[lang], key));
+  }
+
+  // Required keys per scope. Keep keys minimal — these are the UI strings
+  // that must be present before we consider the scope translated.
+  const required = {
+    setup: ['setup_username','setup_username_hint','setup_avatar','btn_choose_photo','btn_join','lang_other_placeholder','btn_next','lang_title'],
+    chat: ['chat_title','chat_placeholder','connected_users','you'],
+    ctx: ['ctx_copy_message','ctx_view_original','ctx_view_translation','ctx_retranslate','ctx_prev_translation','ctx_view_latest','ctx_reply'],
+    users: ['connected_users','you'],
+  };
+
+  // qc keys: derive from QC_TREE (title + category labels + messages)
+  const qcKeySet = new Set(['qc_title']);
+  if (typeof QC_TREE !== 'undefined' && Array.isArray(QC_TREE)) {
+    QC_TREE.forEach(cat => {
+      if (cat.labelKey) qcKeySet.add(cat.labelKey);
+      if (Array.isArray(cat.messages)) cat.messages.forEach(m => qcKeySet.add(m));
+    });
+  }
+  required.qc = Array.from(qcKeySet);
+
+  // Evaluate each banner in the DOM
+  document.querySelectorAll('.ui-translating-banner').forEach(el => {
+    const scope = el.dataset.scope || 'setup';
+    const keys = required[scope] || [];
+    // Consider English as "already present" (server doesn't need to send English).
+    const allPresent = lang === 'en' || keys.every(k => hasServerKey(k));
+    if (allPresent) {
+      el.style.display = 'none';
+    } else {
+      // If not all present, ensure banner is visible and has appropriate text.
+      el.textContent = _translatingUIByLang[lang] || _translatingUIByLang.en;
+      el.style.display = '';
+    }
+  });
 }
 
 // ─── Setup screen ────────────────────────────────────────────────────────────
@@ -618,6 +771,7 @@ async function joinChat(){
   users[myUserId] = {id:myUserId, username:myUsername, language:myLanguage, avatarBase64:myAvatarBase64};
   showScreen('screen-chat');
   updateUserList();
+  openQcSheet(); // Just to give them an idea about the button //TODO: maybe just show an icon pointing to it, preferably bouncing a bit?
 
   await postApi('/api/join',{userId:myUserId,username:myUsername,language:myLanguage,avatar:myAvatarBase64});
 
@@ -663,11 +817,8 @@ function handleEvent(ev){
       (ev.messages||[]).forEach(m=>{ messages[m.id]=m; });
       (ev.translations||[]).forEach(tr=>{ translations[trKey(tr.messageId,tr.language)]=tr; });
       if (ev.uiTranslations) {
-        const cached = ev.uiTranslations[myLanguage];
-        if (cached) {
-          uiStrings[myLanguage] = Object.assign(uiStrings[myLanguage] || {}, cached);
-          applyUiLang(myLanguage);
-        }
+        mergeUiTranslations(ev.uiTranslations.language, ev.uiTranslations.translations); // We now only receive our own selected language at this time.
+        if (ev.uiTranslations.language === myLanguage) applyUiLang(myLanguage);
       }
       renderAllMessages();
       updateUserList();
@@ -695,10 +846,9 @@ function handleEvent(ev){
       updateUserList();
       break;
     case 'ui_translations':
-      if(ev.data.language===myLanguage){
-        uiStrings[ev.data.language] = Object.assign(uiStrings[ev.data.language] || {}, ev.data.translations);
-        applyUiLang(myLanguage);
-      }
+      // Merge the chunk; never replace the whole language object
+      mergeUiTranslations(ev.data.language, ev.data.translations);
+      if(ev.data.language===myLanguage) applyUiLang(myLanguage);
       break;
   }
 }
@@ -848,6 +998,7 @@ function updateMessageTranslation(msgId){
   statusEl.textContent = '';
   statusEl.className = 'msg-translation';
 }
+
 function updateUserList(){
   const list=document.getElementById('users-list');
   list.innerHTML='';
@@ -907,11 +1058,7 @@ function openCtxMenu(e,msgId){
   const prevItem = document.getElementById('ctx-prev-translation');
   if (hasPrev) {
     prevItem.style.display = '';
-    if (isViewingPrev) {
-      prevItem.textContent = '🕒 ' + t('ctx_view_latest');
-    } else {
-      prevItem.textContent = '🕒 ' + t('ctx_prev_translation');
-    }
+    prevItem.textContent = '🕒 ' + (isViewingPrev ? t('ctx_view_latest') : t('ctx_prev_translation'));
   } else {
     prevItem.style.display = 'none';
   }
@@ -1106,6 +1253,236 @@ function makeLongPress(cb,ms=600){
     document.addEventListener('touchend',cancel,{once:true});
     document.addEventListener('touchmove',cancel,{once:true});
   };
+}
+
+// ════════════════════════
+// ─── Quick-chat sheet ───
+// ════════════════════════
+
+// Quick-chat message tree.
+// Each top-level entry is a category; its `messages` array is UI-string keys.
+//
+// Messages are sorted roughly most→least universally useful.
+const QC_TREE = [
+  {
+    icon: '💬',
+    labelKey: 'qc_cat_conversation',
+    messages: [
+      'qc_translation_unclear',
+      'qc_say_more_simply',
+      'qc_slow_down',
+      'qc_still_learning',
+      'qc_what_language_prefer',
+      'qc_did_not_understand',
+    ]
+  },
+  {
+    icon: '🗺️',
+    labelKey: 'qc_cat_about_you',
+    messages: [
+      'qc_where_are_you_from',
+      'qc_where_do_you_live',
+      'qc_how_long_been_here',
+      'qc_visiting_or_local',
+      'qc_what_do_for_work',
+      'qc_what_are_hobbies',
+      'qc_have_you_traveled',
+    ]
+  },
+  {
+    icon: '📍',
+    labelKey: 'qc_cat_right_here',
+    messages: [
+      'qc_what_brings_you_here',
+      'qc_first_time_here',
+      'qc_how_did_you_hear',
+      'qc_here_alone_friends',
+      'qc_how_long_staying',
+      'qc_what_think_of_place',
+    ]
+  },
+  {
+    icon: '🤝',
+    labelKey: 'qc_cat_common_ground',
+    messages: [
+      'qc_do_you_know_anyone',
+      'qc_what_music_like',
+      'qc_what_do_weekends',
+      'qc_what_passionate_about',
+      'qc_what_are_you_reading',
+    ]
+  },
+  {
+    icon: '☕',
+    labelKey: 'qc_cat_spend_time',
+    messages: [
+      'qc_want_grab_drink',
+      'qc_want_grab_food',
+      'qc_want_keep_walking',
+      'qc_want_join_group',
+      'qc_know_good_place_nearby',
+    ]
+  },
+  {
+    icon: '👋',
+    labelKey: 'qc_cat_wrapping_up',
+    messages: [
+      'qc_nice_meeting_you',
+      'qc_talk_again_later',
+      'qc_hope_meet_again',
+      'qc_get_contact_info',
+      'qc_have_great_day',
+    ]
+  },
+];
+
+// ── Sheet state ───────────────────────────────────────────────────────────────
+let qcCurrentCategory = null;  // null = root level, object = category being shown
+let qcHistoryState = null;     // the history entry we pushed when opening
+
+// ── Back-button interception ──────────────────────────────────────────────────
+// We push a state when opening the sheet and pop it on close.
+// popstate fires when the user hits the hardware/browser back button.
+window.addEventListener('popstate', e => {
+  // After a navigation, history.state reflects the currently active state.
+  const isQcStateActive = !!(history.state && history.state.qcSheet);
+
+  if (!isQcStateActive) {
+    // QC state was popped → ensure the sheet is closed
+    _closeQcSheetNoHistory();
+    return;
+  }
+
+  // We're on a qcSheet history entry. If a category drill-down is open, go back to root.
+  if (qcCurrentCategory) {
+    _qcShowRoot(false); // don't push another history entry
+    // re-push to keep intercepting subsequent back presses while sheet is open
+    history.pushState({ qcSheet: true }, '');
+  }
+});
+
+function openQcSheet() {
+  // Push a history entry so back button is intercepted
+  history.pushState({ qcSheet: true }, '');
+  qcHistoryState = true;
+  _qcShowRoot(false);
+  document.getElementById('qc-backdrop').classList.add('open');
+  document.getElementById('qc-sheet').classList.add('open');
+}
+
+function closeQcSheet() {
+  // If we pushed a state, try to navigate back so the popstate handler runs and cleans up.
+  if (qcHistoryState) {
+    qcHistoryState = null;
+    // If the current history state is the qc marker we pushed, go back; otherwise close immediately.
+    if (history.state && history.state.qcSheet) {
+      history.back();
+    } else {
+      _closeQcSheetNoHistory();
+    }
+  } else {
+    _closeQcSheetNoHistory();
+  }
+}
+
+function _closeQcSheetNoHistory() {
+  qcCurrentCategory = null;
+  qcHistoryState = null;
+  document.getElementById('qc-backdrop').classList.remove('open');
+  document.getElementById('qc-sheet').classList.remove('open');
+}
+
+function qcBack() {
+  // Back inside drill-down → go to root
+  if (qcCurrentCategory) {
+    _qcShowRoot(false);
+  }
+}
+
+// ── Rendering helpers ─────────────────────────────────────────────────────────
+function _qcShowRoot(pushState) {
+  qcCurrentCategory = null;
+  const titleEl = document.getElementById('qc-title-text');
+  const backBtn = document.getElementById('qc-back-btn');
+  titleEl.textContent = t('qc_title');
+  backBtn.classList.remove('visible');
+
+  const list = document.getElementById('qc-list');
+  list.innerHTML = '';
+  QC_TREE.forEach(cat => {
+    const item = document.createElement('div');
+    item.className = 'qc-item';
+    item.innerHTML = `
+      <span class="qc-item-icon">${cat.icon}</span>
+      <span class="qc-item-text">${t(cat.labelKey)}</span>
+      <span class="qc-item-arrow">›</span>
+    `;
+    item.addEventListener('click', () => _qcShowCategory(cat));
+    list.appendChild(item);
+  });
+  // keep the quick-chat UI fresh after initial render
+  refreshQcUi();
+}
+
+function _qcShowCategory(cat) {
+  qcCurrentCategory = cat;
+  const titleEl = document.getElementById('qc-title-text');
+  const backBtn = document.getElementById('qc-back-btn');
+  titleEl.textContent = cat.icon + ' ' + t(cat.labelKey);
+  backBtn.classList.add('visible');
+
+  const list = document.getElementById('qc-list');
+  list.innerHTML = '';
+  cat.messages.forEach(key => {
+    const item = document.createElement('div');
+    item.className = 'qc-item';
+    item.innerHTML = `<span class="qc-item-text">${t(key)}</span>`;
+    item.addEventListener('click', () => _qcSelectMessage(key));
+    list.appendChild(item);
+  });
+  // keep the quick-chat UI updated (title already set above)
+  refreshQcUi();
+}
+
+function _qcSelectMessage(key) {
+  const text = t(key);
+  const input = document.getElementById('msg-input');
+  input.value = text;
+  // Resize textarea to fit
+  input.style.height = '';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  // Close sheet, then focus with caret at end
+  closeQcSheet();
+  requestAnimationFrame(() => {
+    input.focus();
+    input.setSelectionRange(text.length, text.length);
+  });
+}
+
+// Refresh quick-chat UI pieces without re-creating the sheet DOM.
+function refreshQcUi() {
+  const titleEl = document.getElementById('qc-title-text');
+  const listEl = document.getElementById('qc-list');
+  if (!titleEl || !listEl) return;
+
+  if (!qcCurrentCategory) {
+    // root: title + category labels
+    titleEl.textContent = t('qc_title');
+    const children = Array.from(listEl.children);
+    children.forEach((child, idx) => {
+      const textSpan = child.querySelector('.qc-item-text');
+      if (textSpan && QC_TREE[idx]) textSpan.textContent = t(QC_TREE[idx].labelKey);
+    });
+  } else {
+    // category drill-down: title shows icon + translated label, list shows messages
+    titleEl.textContent = qcCurrentCategory.icon + ' ' + t(qcCurrentCategory.labelKey);
+    const children = Array.from(listEl.children);
+    children.forEach((child, idx) => {
+      const textSpan = child.querySelector('.qc-item-text');
+      const key = qcCurrentCategory.messages[idx];
+      if (textSpan && key) textSpan.textContent = t(key);
+    });
+  }
 }
 </script>
 </body>

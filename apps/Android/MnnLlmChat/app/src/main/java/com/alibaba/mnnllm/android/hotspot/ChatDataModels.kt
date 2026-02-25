@@ -33,7 +33,7 @@ data class MessageTranslation(
 /**
  * A translation work item with a priority.
  * Lower number = higher priority:
- *   0 → UI text translation for a new language
+ *   0 → UI text translation for a new language (one task per chunk)
  *   1 → newly sent message (FIFO within this tier)
  *   2 → retranslation with more context
  *   3 → historical messages for a newcomer (newest→oldest within this tier)
@@ -46,9 +46,15 @@ sealed class TranslationTask(val priority: Int) : Comparable<TranslationTask> {
 
     data class UiTranslationTask(
         val language: String,
-        val requestId: String,
+        val chunkIndex: Int,
+        /** The subset of UI_STRINGS_EN that this chunk covers. */
+        val chunk: Map<String, String>,
     ) : TranslationTask(0) {
-        override val key get() = "ui:$language"
+        override val key get() = "ui:$language:$chunkIndex"
+        override fun compareTo(other: TranslationTask): Int {
+            if (other !is UiTranslationTask) return priority.compareTo(other.priority)
+            return compareValuesBy(this, other, { it.priority }, { it.chunkIndex })
+        }
     }
 
     data class MessageTranslationTask(
