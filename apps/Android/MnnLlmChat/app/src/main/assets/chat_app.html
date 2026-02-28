@@ -43,6 +43,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .header-users:active{background:#f0f2f5}
 .btn-icon{background:none;border:none;cursor:pointer;padding:6px;border-radius:8px;font-size:1.2em;display:flex;align-items:center}
 .btn-icon:active{background:#f0f2f5}
+.action-btn { background: #e8eaff; color: #4252b6; padding: 10px; border-radius: 10px; text-align: center; margin: 10px 18px; font-weight: 600; cursor: pointer; border: 1px solid #c5cbf0; }
+.action-btn:active { background: #d0d4f5; }
+#qr-display { text-align: center; margin-top: 10px; display: none; background: #fff; padding: 10px; border-radius: 10px; }
 /* Connection banner */
 .conn-banner{display:none;background:#f0ad4e;color:#fff;text-align:center;padding:8px;font-size:.9em;font-weight:600}
 .conn-banner.lost{display:block}
@@ -81,10 +84,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .ctx-item:active{background:#f0f2f5}
 .ctx-item.danger{color:#d9534f}
 /* Users panel */
-#users-panel{display:none;position:fixed;top:0;right:0;bottom:0;width:min(260px,80vw);background:#fff;box-shadow:-4px 0 24px rgba(0,0,0,.12);z-index:900;flex-direction:column;padding:20px 0}
-#users-panel.open{display:flex}
+#users-panel{display:none;position:fixed;top:0;right:0;bottom:0;width:min(260px,80vw);background:#fff;box-shadow:-4px 0 24px rgba(0,0,0,.12);z-index:900;flex-direction:column;padding:20px 0;box-sizing:border-box;}
+#users-panel.open{display:flex;overflow-y:auto;-webkit-overflow-scrolling:touch;}
 .users-title{font-size:1.05em;font-weight:700;padding:0 18px 12px;border-bottom:1px solid #eee}
-.user-item{display:flex;align-items:center;gap:12px;padding:12px 18px}
+.user-item{display:flex;align-items:center;gap:12px;padding:12px 8px}
 .user-avatar-sm{width:36px;height:36px;border-radius:50%;background:#dde;flex-shrink:0;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:1.1em}
 .user-avatar-sm img{width:100%;height:100%;object-fit:cover}
 .user-info-sm{flex:1;min-width:0}
@@ -106,11 +109,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   border-radius:20px 20px 0 0;
   box-shadow:0 -4px 32px rgba(0,0,0,.16);
   z-index:860;
-  max-height:70dvh;
+  max-height:70vh;
   display:flex;flex-direction:column;
   transform:translateY(100%);
   transition:transform .28s cubic-bezier(.4,0,.2,1);
-  overflow:hidden;
+  overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
 }
 #qc-sheet.open{transform:translateY(0)}
 
@@ -164,11 +168,53 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   display:flex;align-items:center;flex-shrink:0;
 }
 #qc-btn:active{background:#f0f2f5}
+
+/* ── HTTPS upgrade banner ──────────────────────────────────────────────────── */
+#https-banner{
+  display:none;
+  background:#fff3cd;
+  color:#856404;
+  border:1px solid #ffc107;
+  border-radius:10px;
+  margin:10px 18px 0;
+  padding:10px 14px;
+  font-size:.9em;
+  line-height:1.5;
+}
+#https-banner.visible{display:block}
+#https-banner button{
+  margin-top:8px;
+  background:#4252b6;color:#fff;border:none;
+  border-radius:8px;padding:7px 14px;
+  font-size:.9em;font-weight:600;cursor:pointer;width:100%;
+}
+#https-banner button:active{background:#3341a0}
+
+/* ── Avatar Modal ──────────────────────────────────────────────────────── */
+#avatar-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, .6);
+  padding: 20px;
+  align-items: center;
+  justify-content: center;
+}
+#avatar-modal.open {
+  display: flex;
+}
+#avatar-modal img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.5);
+}
 </style>
 </head>
 <body>
 
-<!-- server will inject builtin English UI strings here -->
+<!-- server will inject builtin English UI strings and __HTTPS_PORT__ here -->
 <!--__INJECT_BUILTIN_UI__-->
 
 <!-- ─── Screen 0: Loading (shown briefly during auto-login check) ─────────── -->
@@ -177,7 +223,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   <div class="loading-text">Loading…</div>
 </div>
 
-<!-- ─── Screen 1: Language ─────────────────────────────────────────────────── -->
+<!-- ─── Screen 1: Language ────────────────────────────────────────────────── -->
 <div id="screen-lang" class="screen">
   <div class="lang-title" id="txt-lang-title">Select your language</div>
   <div class="lang-grid" id="lang-grid">
@@ -269,8 +315,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
 <div id="users-panel">
   <div class="ui-translating-banner" data-scope="users" style="display:none"></div>
+  <!-- HTTPS upgrade banner — shown when notifications are requested but we're on HTTP - disabled, but kept for posterity -->
+  <div id="https-banner">
+    🔒 Notifications require HTTPS. Tap below to switch. <br><!--TODO: translation-->
+    You'll need to accept the security warning.
+    <button onclick="switchToHttps()">Switch to HTTPS & enable notifications</button><!--TODO: translation-->
+  </div>
+  <div class="action-btn" onclick="toggleNotifs()" id="btn-notifs">🔔 Enable Notifications</div>
+  <div class="action-btn" onclick="showShareQR()">📲 Share Chat Link</div>
+  <div id="qr-display"></div>
   <div class="users-title" id="txt-connected-users">Connected users</div>
   <div id="users-list"></div>
+</div>
+
+<!-- ─── Avatar Modal ──────────────────────────────────────────────────────── -->
+<div id="avatar-modal" onclick="closeLargeAvatar()">
+  <img id="avatar-modal-img" alt="Profile image">
 </div>
 
 <script>
@@ -295,8 +355,29 @@ let reconnecting = false;
 
 localStorage.setItem('userId', myUserId);
 
-// ─── All UI translations (mutable container for builtin + server-provided UIs) ─────────────
-// All hard-coded languages are injected by the Kotlin server into window.__BUILTIN_UI_STRINGS__.
+// ─── HTTP vs HTTPS awareness ─────────────────────────────────────────────────
+// The server runs HTTP on one port and HTTPS on another (injected as __HTTPS_PORT__).
+// We default to HTTP. The user opts into HTTPS only when they want notifications.
+const IS_HTTPS = location.protocol === 'https:';
+const HTTPS_PORT = window.__HTTPS_PORT__ || 8766;
+
+/**
+ * Redirect to the HTTPS version of this page, preserving path/query.
+ * Called when the user taps "Switch to HTTPS" in the notifications flow.
+ */
+function switchToHttps() {
+  if (IS_HTTPS) return;
+  const url = new URL(location.href);
+  url.protocol = 'https:';
+  url.port = String(HTTPS_PORT);
+  url.searchParams.set('userId', myUserId);
+  url.searchParams.set('username', myUsername);
+  url.searchParams.set('lang', myLanguage);
+  url.searchParams.set('notifs', '1');
+  location.href = url.toString();
+}
+
+// ─── All UI translations ─────────────────────────────────────────────────────
 let uiStrings = Object.assign(
   { en: {}, ko: {}, ja: {} },
   window.__BUILTIN_UI_STRINGS__ || {}
@@ -512,10 +593,6 @@ function applyUiLang(lang) {
     Object.keys(en).forEach(k => { if (UI[k] === undefined) UI[k] = en[k]; });
   }
 
-  // Language screen
-  const langTitleEl = document.getElementById('txt-lang-title');
-  if (langTitleEl) langTitleEl.textContent = t('lang_title');
-
   // chat title (in header)
   const chatTitleEl = document.getElementById('txt-chat-title');
   if (chatTitleEl) chatTitleEl.textContent = '💬 ' + t('chat_title');
@@ -532,17 +609,14 @@ function applyUiLang(lang) {
   const btnJoinEl = document.getElementById('txt-btn-join');
   if (btnJoinEl) btnJoinEl.textContent = t('btn_join');
 
-  // lang-custom placeholder + next button text
-  const lc = document.getElementById('lang-custom');
-  if (lc) lc.placeholder = t('lang_other_placeholder') || lc.placeholder;
-  const btnNext = document.getElementById('btn-lang-next');
-  if (btnNext) btnNext.textContent = t('btn_next') || btnNext.textContent;
-
   // chat screen pieces that might already be visible
   const mi = document.getElementById('msg-input');
   if (mi) mi.placeholder = t('chat_placeholder');
   const connectedUsersEl = document.getElementById('txt-connected-users');
   if (connectedUsersEl) connectedUsersEl.textContent = t('connected_users');
+  updateNotifsButton();
+  const shareBtn = document.querySelector('.action-btn[onclick="showShareQR()"]');
+  if (shareBtn) shareBtn.textContent = '📲 ' + t('btn_share_link');
 
   // context menu
   const copyEl = document.getElementById('ctx-copy');
@@ -561,65 +635,10 @@ function applyUiLang(lang) {
   // Quick-chat UI
   refreshQcUi();
 
-//TODO: if necessary pieces are in the right language *for current screen*, hide "UI translating..." banner *for current screen*
   hideUiTranslatingBanner(); // hide once real translation is applied
 }
 
 function genId() { return Math.random().toString(36).slice(2)+Date.now().toString(36); }
-
-// ─── Startup session check ───────────────────────────────────────────────────
-// Two distinct cases are handled here, both resulting in either auto-joining
-// the chat (skipping setup) or falling through to the normal language screen.
-//
-// Case 1 — localhost (127.0.0.1 / WebView or any browser on the host device):
-//   localStorage is siloed per browser, so we cannot rely on a stored userId.
-//   Instead we ask the server for the well-known fixed host userId via
-//   GET /api/host-user-id, unconditionally adopt it, and skip setup if the
-//   server already has a ChatUser for that id.
-//
-// Case 2 — remote device, same browser, new tab:
-//   localStorage IS shared across tabs in the same browser, so myUserId is
-//   already the correct value from the earlier tab.  We ask the server whether
-//   it knows this userId via GET /api/session/:userId.  If yes, skip setup.
-//   If no (genuinely new visitor), go through normal setup.
-(async function checkStartupSession() {
-  showScreen('screen-loading');
-
-  const isLocalhost = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
-
-  try {
-    if (isLocalhost) {
-      // ── Case 1: host device ──────────────────────────────────────────────
-      const res = await fetch('/api/host-user-id');
-      if (!res.ok) throw new Error('host-user-id fetch failed: ' + res.status);
-      const data = await res.json();
-
-      // Unconditionally adopt the server-assigned host userId, overwriting
-      // whatever random id this browser might have had in localStorage.
-      myUserId = data.hostUserId;
-      localStorage.setItem('userId', myUserId);
-
-      if (data.user) {
-        autoLogin(data.user);
-      } else {
-        // Host hasn't joined yet in any browser — show setup with fixed userId.
-        initLangScreen();
-      }
-    } else {
-      // ── Case 2: remote device, possibly a new tab in same browser ────────
-      const res = await fetch('/api/session/' + encodeURIComponent(myUserId));
-      if (res.ok) {
-        autoLogin(await res.json());
-      } else {
-        // Genuinely new visitor — go through normal setup.
-        initLangScreen();
-      }
-    }
-  } catch (e) {
-    console.warn('Startup session check failed, proceeding to setup:', e);
-    initLangScreen();
-  }
-})();
 
 // Shared helper: restore state from a known ChatUser and jump straight to chat. Awaiting is not necesary.
 async function autoLogin(user) {
@@ -632,6 +651,47 @@ async function autoLogin(user) {
   showScreen('screen-chat');
   connectSSE();
   fetchHistory().catch(e => console.error('fetchHistory (auto-login) failed', e));
+}
+
+/**
+ * True when we are in a secure context (HTTPS or localhost).
+ * The Notification API requires this on most browsers/platforms.
+ */
+const IS_SECURE_CONTEXT = window.isSecureContext ||
+  ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+
+// ─── Service Worker registration & BroadcastChannel ──────────────────────────
+let _swBc = null;      // BroadcastChannel to the SW
+let _swReady = false;  // true once SW is controlling this page
+
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  // SW requires a secure context (HTTPS or localhost).
+  if (!IS_SECURE_CONTEXT) return;
+
+  try {
+    const reg = await navigator.serviceWorker.register('/service_worker.js', { scope: '/' });
+    // Wait until the SW is active and controlling this page.
+    await navigator.serviceWorker.ready;
+    _swBc = new BroadcastChannel('mnn_chat_sw');
+    _swReady = true;
+
+    // Keepalive: ping the SW every 20 s so Android doesn't kill it.
+    setInterval(() => {
+      if (_swBc) _swBc.postMessage({ type: 'ping' });
+    }, 20_000);
+
+    console.log('Service worker registered, scope:', reg.scope);
+  } catch (e) {
+    console.warn('Service worker registration failed:', e);
+  }
+}
+
+// Forward an incoming message to the SW (called from appendMessage).
+// myUserId is passed so the SW can filter out our own messages.
+function swNotify(msg) {
+  if (!_swReady || !_swBc || !notifsEnabled) return;
+  _swBc.postMessage({ type: 'incoming', msg, myUserId });
 }
 
 // Trigger UI translation immediately for non-builtin languages. No need to await.
@@ -695,6 +755,7 @@ function showUiTranslatingBanner(scope) {
     el.textContent = text;
     el.style.display = '';
   });
+  hideUiTranslatingBanner();
 }
 
 // Hide per-scope translating banners only when the scope's
@@ -710,10 +771,10 @@ function hideUiTranslatingBanner() {
   // Required keys per scope. Keep keys minimal — these are the UI strings
   // that must be present before we consider the scope translated.
   const required = {
-    setup: ['setup_username','setup_username_hint','setup_avatar','btn_choose_photo','btn_join','lang_other_placeholder','btn_next','lang_title'],
+    setup: ['setup_username','setup_username_hint','setup_avatar','btn_choose_photo','btn_join','lang_other_placeholder','btn_next'],
     chat: ['chat_title','chat_placeholder','connected_users','you'],
     ctx: ['ctx_copy_message','ctx_view_original','ctx_view_translation','ctx_retranslate','ctx_prev_translation','ctx_view_latest','ctx_reply'],
-    users: ['connected_users','you'],
+    users: ['connected_users','you','btn_enable_notifs','btn_share_link'],
   };
 
   // qc keys: derive from QC_TREE (title + category labels + messages)
@@ -745,12 +806,28 @@ function hideUiTranslatingBanner() {
 // ─── Setup screen ────────────────────────────────────────────────────────────
 document.getElementById('file-input').addEventListener('change', e=>{
   const f = e.target.files[0];
-  if(!f) return;
+  if (!f) return;
   const r = new FileReader();
-  r.onload = ev=>{
-    myAvatarBase64 = ev.target.result;
-    const prev = document.getElementById('avatar-preview');
-    prev.innerHTML = `<img src="${myAvatarBase64}" alt="">`;
+  r.onload = ev => {
+    const img = new Image();
+    img.onload = () => {
+      //Host's phone is doing all the AI work; at least let the others resize their own pictures. :)
+      const MAX_PIXELS = 1_000_000;
+      const pixels = img.width * img.height;
+      let w = img.width, h = img.height;
+      if (pixels > MAX_PIXELS) {
+        const scale = Math.sqrt(MAX_PIXELS / pixels);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      myAvatarBase64 = canvas.toDataURL('image/jpeg', 0.82);
+      const prev = document.getElementById('avatar-preview');
+      prev.innerHTML = `<img src="${myAvatarBase64}" alt="">`;
+    };
+    img.src = ev.target.result;
   };
   r.readAsDataURL(f);
 });
@@ -804,6 +881,7 @@ function connectSSE(){
     }
     reconnectTimer = setTimeout(connectSSE, 3000);
   };
+  registerServiceWorker();
 }
 
 function handleEvent(ev){
@@ -932,7 +1010,139 @@ function getBubbleDisplay(msgId) {
   return { text: msg.text, origin: 'original' };
 }
 
-function appendMessage(msg){
+// ─── Notifications ────────────────────────────────────────────────────────────
+let notifsEnabled = false;
+
+// Restore state from HTTPS redirect params (from the 'switch to HTTPS and enable notifications' button)
+(function restoreFromRedirectParams() {
+  const p = new URLSearchParams(location.search);
+  if (p.get('userId')) { myUserId = p.get('userId'); localStorage.setItem('userId', myUserId); }
+  if (p.get('username')) myUsername = p.get('username');
+  if (p.get('lang')) myLanguage = p.get('lang');
+  if (p.get('notifs') === '1') {
+    // Clean URL immediately so refreshing doesn't re-trigger
+    const clean = new URL(location.href);
+    clean.searchParams.delete('notifs');
+    clean.searchParams.delete('userId');
+    clean.searchParams.delete('username');
+    clean.searchParams.delete('lang');
+    history.replaceState(null, '', clean.toString());
+    
+    toggleNotifs();
+  }
+})();
+
+function updateNotifsButton(){
+  const btn = document.getElementById('btn-notifs');
+  if(!btn) return;
+  if (!IS_SECURE_CONTEXT) { // Turns out you need a trusted SSL connection for service workers; no way around actually having the cert installed. So I'll just disable notifs entirely except for localhost/loopback. Leaving the code in because you can still do it if you REALLY want. (The server would also have to offer the cert for download, I think.)
+    btn.style.display = "none";
+    return;
+  }
+  if (!('Notification' in window) || (!IS_SECURE_CONTEXT && !IS_HTTPS)) {
+    // Not supported or not reachable without HTTPS
+    btn.textContent = '🔔 ' + t('btn_enable_notifs');
+    return;
+  }
+  btn.textContent = notifsEnabled ? '🔕 ' + t('btn_disable_notifs') : '🔔 ' + t('btn_enable_notifs');
+}
+
+/**
+ * Toggle notifications. If we're on HTTP and not localhost, show the HTTPS
+ * upgrade banner instead of failing silently.
+ */
+function toggleNotifs() {
+  // If already enabled, just toggle off.
+  if (notifsEnabled) {
+    notifsEnabled = false;
+    updateNotifsButton();
+    document.getElementById('https-banner').classList.remove('visible');
+    return;
+  }
+
+  // Notifications require a secure context.
+  if (!IS_SECURE_CONTEXT) {
+    // Show the HTTPS upgrade banner — don't show a browser permission dialog.
+    document.getElementById('https-banner').classList.add('visible');
+    return;
+  }
+
+  if (!('Notification' in window)) {
+    // API truly unavailable (very old browser).
+    notifsEnabled = false;
+    updateNotifsButton();
+    return;
+  }
+
+  if (Notification.permission === 'granted') {
+    notifsEnabled = true;
+    updateNotifsButton();
+    _sendTestNotification();
+  } else if (Notification.permission === 'denied') {
+    // Permission permanently denied — user must fix in browser settings.
+    alert('Notification permission was blocked. Please enable it in your browser settings and reload.');
+  } else {
+    // 'default' — request permission.
+    Notification.requestPermission().then(p => {
+      notifsEnabled = (p === 'granted');
+      updateNotifsButton();
+      if (notifsEnabled) {
+        registerServiceWorker();
+        _sendTestNotification();
+      }
+    }).catch(() => {
+      notifsEnabled = false;
+      updateNotifsButton();
+    });
+  }
+}
+
+/** Fire a test notification + vibration to confirm everything works. */
+function _sendTestNotification() {
+  try {
+    // Some Android browsers block new Notification() outside a service worker.
+    // We try it anyway; if it throws we swallow silently.
+    new Notification('💬 Notifications enabled', {
+      body: 'You\'ll be notified of new messages.',
+      silent: false,
+    });
+  } catch(e) {
+    console.warn('Test notification failed (may need service worker on this platform):', e);
+  }
+  if (navigator.vibrate) navigator.vibrate([150, 80, 150]);
+}
+
+/**
+ * Fire an incoming-message notification.
+ * Uses the Notification API when the page is hidden, vibration always.
+ */
+function _notifyIncomingMessage(msg) {
+  if (!notifsEnabled) return;
+
+  // Always vibrate (works even when page is visible).
+  if (navigator.vibrate) {
+    try { navigator.vibrate([200, 100, 200]); } catch(e) {}
+  }
+
+  // Only show a system notification when the page is hidden/blurred.
+  if (document.hidden || document.visibilityState === 'hidden') {
+    if (Notification.permission === 'granted') {
+      try {
+        new Notification(msg.username, {
+          body: msg.text,
+          silent: false,
+          // tag groups rapid messages from the same person into one banner
+          tag: 'msg-' + msg.userId,
+          renotify: true,
+        });
+      } catch(e) {
+        console.warn('Notification failed:', e);
+      }
+    }
+  }
+}
+
+function appendMessage(msg) {
   const list = document.getElementById('msg-list');
   if(document.getElementById('msg-'+msg.id)) return; // already rendered
   const isMe = msg.userId===myUserId;
@@ -944,9 +1154,11 @@ function appendMessage(msg){
   if(!isMe){
     const uname=document.createElement('div');
     uname.className='msg-username';
-    uname.textContent=msg.username;
+    const unameText = document.createTextNode(msg.username);
+    uname.appendChild(unameText);
     wrap.appendChild(uname);
   }
+
   if(msg.replyToId){
     const rb=document.createElement('div');
     rb.className='msg-reply';
@@ -975,6 +1187,57 @@ function appendMessage(msg){
   list.appendChild(wrap);
   updateMessageTranslation(msg.id);
   scrollBottom();
+
+  // Notification — only for messages from others, never our own.
+  if (!isMe) {
+    if (_swReady) {
+      swNotify(msg); // works when the tab is in the background
+    } else {
+      _notifyIncomingMessage(msg); // fallback: foreground-only Notification API
+    }
+    // Vibrate always, regardless of SW availability.
+    if (notifsEnabled && navigator.vibrate) {
+      try { navigator.vibrate([200, 100, 200]); } catch(_) {}
+    }
+  }
+}
+
+function showLargeAvatar(base64) {
+  if (!base64) return;
+  const modal = document.getElementById('avatar-modal');
+  if (!modal) return;
+  if (modal.classList.contains('open')) return;
+
+  // Push a history entry so hardware back closes the modal (handled by popstate above).
+  history.pushState({ avatarModal: true }, '');
+  avatarHistoryState = true;
+
+  // Set the image source
+  const img = document.getElementById('avatar-modal-img');
+  img.src = base64;
+  img.alt = 'Profile image';
+
+  // Show the modal
+  modal.classList.add('open');
+}
+
+function _closeAvatarNoHistory() {
+  const modal = document.getElementById('avatar-modal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  avatarHistoryState = null;
+}
+
+function closeLargeAvatar() {
+  // If we pushed a history entry, navigate back so the shared popstate handler runs.
+  if (avatarHistoryState) {
+    avatarHistoryState = null;
+    if (history.state && history.state.avatarModal) {
+      history.back();
+      return;
+    }
+  }
+  _closeAvatarNoHistory();
 }
 
 function updateMessageTranslation(msgId){
@@ -1019,10 +1282,37 @@ function updateUserList(){
     const lg=document.createElement('div');
     lg.className='user-lang-sm';
     lg.textContent=u.language;
+    if (u.id === myUserId) {
+      item.style.cursor = 'pointer';
+      const editHint = document.createElement('div');
+      editHint.textContent = '✏️';
+      editHint.style.cssText = 'font-size:1.1em;color:#aaa';
+      item.appendChild(editHint);
+      item.addEventListener('click', openEditProfile);
+    } else {
+      item.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        showLargeAvatar(u.avatarBase64);
+      });
+    }
     info.append(nm,lg);
     item.append(av,info);
     list.appendChild(item);
   });
+  updateNotifsButton();
+}
+
+function openEditProfile() {
+  // Pre-fill setup screen with current values
+  document.getElementById('username-input').value = myUsername;
+  const prev = document.getElementById('avatar-preview');
+  if (myAvatarBase64) {
+    prev.innerHTML = `<img src="${myAvatarBase64}" alt="">`;
+  } else {
+    prev.textContent = '🙂';
+  }
+  closeAll();
+  showScreen('screen-setup');
 }
 
 function scrollBottom(){
@@ -1198,6 +1488,47 @@ function toggleUsersPanel(){
   if (isOpen || !document.getElementById('ctx-menu').classList.contains('open')) ov.classList.toggle('open', !isOpen);
 }
 
+// Share QR logic, allowing each user to share both the Wi-Fi connection (if it's the app running in hotspot mode) and the chatroom URL
+function showShareQR() {
+  const qrContainer = document.getElementById('qr-display');
+  if (qrContainer.style.display === 'block') {
+    qrContainer.style.display = 'none';
+    return;
+  }
+
+  // Clear previous content
+  qrContainer.innerHTML = '';
+
+  const joinUrl = window.location.origin;
+
+  // WiFi QR (hotspot mode only — hidden if server returns 404)
+  const wifiLabel = document.createElement('div');
+  wifiLabel.style.cssText = 'font-size:0.8em;font-weight:600;margin-bottom:4px';
+  wifiLabel.textContent = '📶 Wi-Fi';
+
+  const wifiImg = document.createElement('img');
+  wifiImg.src = '/api/qr?which=wifi';
+  wifiImg.style.cssText = 'width:100%;max-width:200px;display:block;margin:0 auto';
+  wifiImg.onerror = () => { wifiImg.style.display = 'none'; wifiLabel.style.display = 'none'; };
+
+  // URL QR (always shown)
+  const urlImg = document.createElement('img');
+  urlImg.src = '/api/qr?which=url';
+  urlImg.style.cssText = 'width:100%;max-width:200px;display:block;margin:0 auto 8px';
+  urlImg.onerror = () => urlImg.style.display = 'none';
+
+  const urlText = document.createElement('div');
+  urlText.style.cssText = 'font-size:0.8em;word-break:break-all;margin-bottom:12px;color:#555';
+  urlText.textContent = joinUrl;
+
+  qrContainer.appendChild(wifiLabel);
+  qrContainer.appendChild(wifiImg);
+  qrContainer.appendChild(urlImg);
+  qrContainer.appendChild(urlText);
+
+  qrContainer.style.display = 'block';
+}
+
 // ─── Export chat ──────────────────────────────────────────────────────────────
 function exportChat(){
   const lines=['=== Chat Export ===',''];
@@ -1259,34 +1590,32 @@ function makeLongPress(cb,ms=600){
 // ─── Quick-chat sheet ───
 // ════════════════════════
 
-// Quick-chat message tree.
-// Each top-level entry is a category; its `messages` array is UI-string keys.
-//
 // Messages are sorted roughly most→least universally useful.
 const QC_TREE = [
   {
     icon: '💬',
     labelKey: 'qc_cat_conversation',
     messages: [
+      'qc_pronounce_my_name',
       'qc_translation_unclear',
       'qc_say_more_simply',
-      'qc_slow_down',
-      'qc_still_learning',
-      'qc_what_language_prefer',
-      'qc_did_not_understand',
+      'qc_think_app_interesting',
+      'qc_do_you_have_internet',
     ]
   },
   {
     icon: '🗺️',
     labelKey: 'qc_cat_about_you',
     messages: [
-      'qc_where_are_you_from',
       'qc_where_do_you_live',
       'qc_how_long_been_here',
       'qc_visiting_or_local',
       'qc_what_do_for_work',
+      'qc_do_you_enjoy_work',
       'qc_what_are_hobbies',
       'qc_have_you_traveled',
+      'qc_what_languages_speak',
+      'qc_whats_in_profile_pic',
     ]
   },
   {
@@ -1299,6 +1628,7 @@ const QC_TREE = [
       'qc_here_alone_friends',
       'qc_how_long_staying',
       'qc_what_think_of_place',
+      'qc_what_is_area_known_for',
     ]
   },
   {
@@ -1339,6 +1669,7 @@ const QC_TREE = [
 // ── Sheet state ───────────────────────────────────────────────────────────────
 let qcCurrentCategory = null;  // null = root level, object = category being shown
 let qcHistoryState = null;     // the history entry we pushed when opening
+let avatarHistoryState = null; // history entry flag for avatar modal
 
 // ── Back-button interception ──────────────────────────────────────────────────
 // We push a state when opening the sheet and pop it on close.
@@ -1346,15 +1677,18 @@ let qcHistoryState = null;     // the history entry we pushed when opening
 window.addEventListener('popstate', e => {
   // After a navigation, history.state reflects the currently active state.
   const isQcStateActive = !!(history.state && history.state.qcSheet);
+  const isAvatarStateActive = !!(history.state && history.state.avatarModal);
 
-  if (!isQcStateActive) {
-    // QC state was popped → ensure the sheet is closed
+  // If neither QC sheet nor avatar modal are present in the active history state,
+  // the user popped away from those UI layers — close both.
+  if (!isQcStateActive && !isAvatarStateActive) {
     _closeQcSheetNoHistory();
+    _closeAvatarNoHistory();
     return;
   }
 
   // We're on a qcSheet history entry. If a category drill-down is open, go back to root.
-  if (qcCurrentCategory) {
+  if (isQcStateActive && qcCurrentCategory) {
     _qcShowRoot(false); // don't push another history entry
     // re-push to keep intercepting subsequent back presses while sheet is open
     history.pushState({ qcSheet: true }, '');
@@ -1484,6 +1818,60 @@ function refreshQcUi() {
     });
   }
 }
+
+// ─── Startup session check ───────────────────────────────────────────────────
+// Two distinct cases are handled here, both resulting in either auto-joining
+// the chat (skipping setup) or falling through to the normal language screen.
+//
+// Case 1 — localhost (127.0.0.1 / WebView or any browser on the host device):
+//   localStorage is siloed per browser, so we cannot rely on a stored userId.
+//   Instead we ask the server for the well-known fixed host userId via
+//   GET /api/host-user-id, unconditionally adopt it, and skip setup if the
+//   server already has a ChatUser for that id.
+//
+// Case 2 — remote device, same browser, new tab:
+//   localStorage IS shared across tabs in the same browser, so myUserId is
+//   already the correct value from the earlier tab.  We ask the server whether
+//   it knows this userId via GET /api/session/:userId.  If yes, skip setup.
+//   If no (genuinely new visitor), go through normal setup.
+(async function checkStartupSession() {
+  showScreen('screen-loading');
+
+  const isLocalhost = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+
+  try {
+    if (isLocalhost) {
+      // ── Case 1: host device ──────────────────────────────────────────────
+      const res = await fetch('/api/host-user-id');
+      if (!res.ok) throw new Error('host-user-id fetch failed: ' + res.status);
+      const data = await res.json();
+
+      // Unconditionally adopt the server-assigned host userId, overwriting
+      // whatever random id this browser might have had in localStorage.
+      myUserId = data.hostUserId;
+      localStorage.setItem('userId', myUserId);
+
+      if (data.user) {
+        autoLogin(data.user);
+      } else {
+        // Host hasn't joined yet in any browser — show setup with fixed userId.
+        initLangScreen();
+      }
+    } else {
+      // ── Case 2: remote device, possibly a new tab in same browser ────────
+      const res = await fetch('/api/session/' + encodeURIComponent(myUserId));
+      if (res.ok) {
+        autoLogin(await res.json());
+      } else {
+        // Genuinely new visitor — go through normal setup.
+        initLangScreen();
+      }
+    }
+  } catch (e) {
+    console.warn('Startup session check failed, proceeding to setup:', e);
+    initLangScreen();
+  }
+})();
 </script>
 </body>
 </html>

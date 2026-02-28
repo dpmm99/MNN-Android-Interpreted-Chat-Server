@@ -49,8 +49,11 @@ sealed class TranslationTask(val priority: Int) : Comparable<TranslationTask> {
         val chunkIndex: Int,
         /** The subset of UI_STRINGS_EN that this chunk covers. */
         val chunk: Map<String, String>,
-    ) : TranslationTask(0) {
-        override val key get() = "ui:$language:$chunkIndex"
+        val repairTriesAllowed: Int = 1,
+        val isRepair: Boolean = false,
+        val rawBadJson: String? = null
+    ) : TranslationTask(if (chunkIndex < 2) 0 else 4) { // Lowest priority for later chunks (mainly quick chat); highest priority for the earliest chunks (chat, reply, basic stuff like that).
+        override val key get() = "ui:$language:$chunkIndex:${if(isRepair) "repair" else "initial"}"
         override fun compareTo(other: TranslationTask): Int {
             if (other !is UiTranslationTask) return priority.compareTo(other.priority)
             return compareValuesBy(this, other, { it.priority }, { it.chunkIndex })

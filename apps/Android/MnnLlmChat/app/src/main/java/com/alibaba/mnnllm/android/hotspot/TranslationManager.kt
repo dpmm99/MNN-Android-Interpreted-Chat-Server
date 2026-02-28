@@ -227,10 +227,19 @@ class TranslationManager(
 
         val languageName = languageNameFor(task.language)
         val uiStrings = task.chunk.entries.joinToString("\n") { (k, v) -> "$k: $v" }
-        val prompt = """Translate each UI string to $languageName for a chat application. 
+        val prompt = if (task.isRepair) {
+            """The following JSON is malformed. Fix it and output ONLY valid JSON.
+It should be a single flat object with as many lower_snake_case keys as there are labels/messages.
+Do not add any explanations or formatting.
+Input:
+${task.rawBadJson}"""
+        } else {
+            val uiStrings = task.chunk.entries.joinToString("\n") { (k, v) -> "$k: $v" }
+            """Translate each UI string to $languageName for a chat application. 
 Output ONLY a JSON object with the same keys and translated values. No other text.
 Input:
 $uiStrings"""
+        }
 
         val result = StringBuilder()
 
@@ -251,7 +260,7 @@ $uiStrings"""
                     result.append(progress)
                     currentLine.append(progress)
 
-                    // ── Token repetition check ───────────────────────────────
+                    // ── Token repetition checks ───────────────────────────────
                     val token = progress
                     recentTokens.addLast(token)
                     if (recentTokens.size > 24) recentTokens.removeFirst()
@@ -260,6 +269,16 @@ $uiStrings"""
                         Log.w(TAG, "Stopping UI inference: token '$token' repeated $tokenRepeatCount times")
                         shouldStop = true
                     }
+                    // This catches a few more common looping patterns (1/2/1/2 or 1/2/3/1/2/3 cycles).
+                    val lastTen = recentTokens.takeLast(10).toList()
+                    if (lastTen.size == 10) {
+                        val distinct = lastTen.toSet()
+                        if (distinct.size in 1..3) {
+                            Log.w(TAG, "Stopping UI translation: last 10 tokens contain only ${distinct.size} distinct token(s): ${distinct.joinToString(", ")}")
+                            shouldStop = true
+                        }
+                    }
+
 
                     // ── Line repetition check ────────────────────────────────
                     if (progress.contains('\n')) {
@@ -315,17 +334,8 @@ $uiStrings"""
             }
         }
 
-        // Extract the JSON object from the response //TODO: would possibly be more efficient to translate in smaller chunks, but certainly harder to code.
-        val jsonStart = raw.indexOf('{')
-        val jsonEnd = raw.lastIndexOf('}')
-        if (jsonStart < 0 || jsonEnd < jsonStart) return
-        
         try {
-            val jsonStr = raw.substring(jsonStart, jsonEnd + 1)
-            Log.d(TAG, "UI translation JSON to parse: $jsonStr")
-
-            // Clean up any potentially malformed JSON
-            val cleanedJsonStr = jsonStr
+            val cleanedJsonStr = raw
                 // poorly-quoted keys:  'key': " or `key": ' or "key': ` or anything like that -> "key": "...
                 .replace(Regex("""(?<=[{,\s])['"`]([a-z_]+)['"`]\s*:\s*['"`]"""), "\"$1\": \"")
                 // unquoted keys:  key:  -> "key":
@@ -334,16 +344,38 @@ $uiStrings"""
                 .replace(Regex("""['"`](,?\s*\n)"""), "\"$1")
                 // trailing comma before closing curly bracket (any amount of whitespace in between)
                 .replace(Regex(""",\s*\}"""), "}")
+                // wrong style of double quotes
+                .replace(Regex("""[“”]"""), "\"")
 
-            Log.d(TAG, "Cleaned JSON: $cleanedJsonStr")
-
-            val map = com.google.gson.Gson()
-                .fromJson<Map<String, String>>(cleanedJsonStr, object : com.google.gson.reflect.TypeToken<Map<String, String>>() {}.type)
+            val jsonStart = cleanedJsonStr.indexOf('{')
+            val jsonEnd = cleanedJsonStr.lastIndexOf('}')
+            if (jsonStart < 0 || jsonEnd < jsonStart) throw Exception("No JSON brackets found")
+            
+            val finalJson = cleanedJsonStr.substring(jsonStart, jsonEnd + 1)
+            
+            val type = object : com.google.gson.reflect.TypeToken<Map<String, String>>() {}.type
+            val map = com.google.gson.Gson().fromJson<Map<String, String>>(finalJson, type)
+            
             Log.d(TAG, "UI chunk translation parsed successfully: ${map.size} keys for ${task.language} chunk ${task.chunkIndex}")
             onUiTranslationChunkReady(task.language, map)
+
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse UI translations for ${task.language} chunk ${task.chunkIndex}", e)
-            //TODO: Handle by using English until the app restarts, to avoid wasting power retrying repeatedly.
+            
+            // Check bracket count to ensure it actually tried to make a JSON object
+            val bracketCount = raw.count { it == '{' || it == '}' }
+            if (bracketCount >= 4 && task.repairTriesAllowed > 0) {
+                Log.w(TAG, "Malformed UI JSON. Enqueuing repair task...")
+                // Enqueue the exact same task but mark as repair and exhaust the retry
+                enqueue(task.copy(
+                    repairTriesAllowed = task.repairTriesAllowed - 1,
+                    isRepair = true,
+                    rawBadJson = raw
+                ))
+            } else {
+                Log.e(TAG, "Repair condition not met or retries exhausted. Skipping chunk.")
+				//TODO: Handle by using English until the app restarts, to avoid wasting power retrying repeatedly.
+            }
         }
     }
 
@@ -356,36 +388,18 @@ $uiStrings"""
             return name.ifBlank { code }
         }
 
-        /** English UI strings used as the source for translation. */
+        /** English UI strings used as the source for translation. NOTE: These are in a deliberate order based on when they should be seen by a new user. */
         val UI_STRINGS_EN = mapOf(
-            "chat_title" to "Chat",
-            "lang_title" to "Select your language",
             "setup_username" to "Choose a username",
             "setup_username_hint" to "Enter your name",
             "setup_avatar" to "Profile picture (optional)",
             "btn_choose_photo" to "Choose photo",
-            "btn_skip" to "Skip",
             "btn_join" to "Join chat",
+            "chat_title" to "Chat",
             "chat_placeholder" to "Type a message…",
             "btn_send" to "Send",
-            "btn_export" to "Export chat",
             "translating" to "Translating…",
-            "retranslating" to "Retranslating…",
-            "ctx_view_original" to "View original",
-            "ctx_view_translation" to "View translation",
-            "ctx_retranslate" to "Retranslate with more context",
-            "ctx_prev_translation" to "View previous translation",
-            "ctx_reply" to "Reply",
-            "ctx_cancel_reply" to "Cancel reply",
-            "connected_users" to "Connected users",
             "connection_lost" to "Connection lost. Reconnecting…",
-            "connection_restored" to "Connected",
-            "you" to "You",
-            "server_host" to "Host",
-            "welcome" to "Welcome to the chat!",
-            "no_messages" to "No messages yet. Say hello!",
-            "ctx_view_latest" to "View latest translation",
-            "ctx_copy_message" to "Copy message",
             "qc_title" to "Quick chat",
             "qc_cat_conversation" to "Conversation",
             "qc_cat_about_you" to "About You",
@@ -393,24 +407,43 @@ $uiStrings"""
             "qc_cat_common_ground" to "Common Ground",
             "qc_cat_spend_time" to "Spend Time",
             "qc_cat_wrapping_up" to "Wrapping Up",
+            "qc_pronounce_my_name"     to "Hello. I will start by pronouncing my name out loud.",
             "qc_translation_unclear"   to "Can you explain that? The translation was unclear.",
             "qc_say_more_simply"       to "Could you say that more simply?",
-            "qc_slow_down"             to "Can we slow down a little?",
-            "qc_still_learning"        to "I am still learning this language, please be patient.",
-            "qc_what_language_prefer"  to "What language are you most comfortable in?",
-            "qc_did_not_understand"    to "I did not understand that last message.",
-            "qc_where_are_you_from"    to "Where are you from originally?",
+            "qc_think_app_interesting" to "I think this app is interesting.",
+            "qc_do_you_have_internet"  to "Do you have internet access?",
+            "ctx_reply" to "Reply", // The context menu options that become available soonest
+            "ctx_copy_message" to "Copy message",
+            "ctx_view_original" to "View original",
+            "ctx_retranslate" to "Retranslate with more context",
+            "connected_users" to "Connected users", // The next several you have to look at the user chat panel to even see
+            "btn_enable_notifs" to "Enable Notifications",
+            "btn_disable_notifs" to "Disable Notifications",
+            "btn_share_link" to "Share Chat Link",
+            "connection_restored" to "Connected",
+            "you" to "You",
+            "server_host" to "Host",
+            "btn_export" to "Export chat", // Near the end of a chat
+            "ctx_cancel_reply" to "Cancel reply", // Only appears after selecting "Reply" on a message, plus you generally can't see it on a phone at all
+            "ctx_view_translation" to "View translation", // Only after you hit 'view original', which requires a translation first
+            "retranslating" to "Retranslating…", // Much lower priority than 'translating' because it requires the use of a context menu option.
+            "ctx_prev_translation" to "View previous translation", // Only after receiving a retranslation
+            "ctx_view_latest" to "View latest translation", // Only after receiving a retranslation AND hitting view previous
             "qc_where_do_you_live"     to "Where do you live now?",
             "qc_how_long_been_here"    to "How long have you been here?",
             "qc_visiting_or_local"     to "Are you visiting or do you live here?",
             "qc_what_do_for_work"      to "What do you do for work?",
             "qc_what_are_hobbies"      to "What are your hobbies?",
             "qc_have_you_traveled"     to "Have you traveled much?",
+            "qc_what_languages_speak"  to "What other languages can you speak?",
+            "qc_whats_in_profile_pic"  to "What's in your profile picture?",
+            "qc_do_you_enjoy_work"     to "Do you enjoy your work?",
             "qc_what_brings_you_here"  to "What brings you here today?",
             "qc_first_time_here"       to "Is this your first time here?",
             "qc_how_did_you_hear"      to "How did you hear about this place?",
             "qc_here_alone_friends"    to "Are you here alone or with friends?",
             "qc_how_long_staying"      to "How long are you staying?",
+            "qc_what_is_area_known_for" to "What is this area known for?",
             "qc_what_think_of_place"   to "What do you think of this place?",
             "qc_do_you_know_anyone"    to "Do you know anyone else here?",
             "qc_what_music_like"       to "What kind of music do you like?",
@@ -461,34 +494,16 @@ $uiStrings"""
         }
 
         val UI_STRINGS_KO = mapOf(
-            "chat_title" to "채팅",
-            "lang_title" to "언어를 선택하세요",
             "setup_username" to "사용자 이름 선택",
             "setup_username_hint" to "이름을 입력하세요",
             "setup_avatar" to "프로필 사진 (선택)",
             "btn_choose_photo" to "사진 선택",
-            "btn_skip" to "건너뛰기",
             "btn_join" to "채팅 참여",
+            "chat_title" to "채팅",
             "chat_placeholder" to "메시지를 입력하세요…",
             "btn_send" to "전송",
-            "btn_export" to "채팅 내보내기",
             "translating" to "번역 중…",
-            "retranslating" to "재번역 중…",
-            "ctx_view_original" to "원문 보기",
-            "ctx_view_translation" to "번역 보기",
-            "ctx_retranslate" to "더 많은 맥락으로 재번역",
-            "ctx_prev_translation" to "이전 번역 보기",
-            "ctx_reply" to "답장",
-            "ctx_cancel_reply" to "답장 취소",
-            "connected_users" to "접속자",
             "connection_lost" to "연결 끊김. 재연결 중…",
-            "connection_restored" to "연결됨",
-            "you" to "나",
-            "server_host" to "호스트",
-            "welcome" to "채팅에 오신 것을 환영합니다!",
-            "no_messages" to "아직 메시지가 없습니다.",
-            "ctx_view_latest" to "최신 번역 보기",
-            "ctx_copy_message" to "메시지 복사",
             "qc_title" to "퀵 채팅",
             "qc_cat_conversation" to "대화",
             "qc_cat_about_you" to "당신에 대해",
@@ -496,24 +511,43 @@ $uiStrings"""
             "qc_cat_common_ground" to "공통점",
             "qc_cat_spend_time" to "함께 시간 보내기",
             "qc_cat_wrapping_up" to "마무리",
+            "qc_pronounce_my_name"      to "안녕하세요. 먼저 제 이름을 소리 내어 말씀드릴게요.",
             "qc_translation_unclear"    to "그게 무슨 뜻인지 설명해 주실 수 있나요? 번역이 불분명했습니다.",
             "qc_say_more_simply"        to "좀 더 간단하게 말씀해 주실 수 있나요?",
-            "qc_slow_down"              to "조금 천천히 얘기할 수 있을까요?",
-            "qc_still_learning"         to "저는 이 언어를 아직 배우고 있어요. 양해해 주세요.",
-            "qc_what_language_prefer"   to "어떤 언어가 가장 편하신가요?",
-            "qc_did_not_understand"     to "방금 메시지를 이해하지 못했습니다.",
-            "qc_where_are_you_from"     to "원래 어디 출신이세요?",
+            "qc_think_app_interesting"  to "이 앱이 흥미롭다고 생각해요.",
+            "qc_do_you_have_internet"   to "인터넷에 접속할 수 있으신가요?",
+            "ctx_reply" to "답장",
+            "ctx_copy_message" to "메시지 복사",
+            "ctx_view_original" to "원문 보기",
+            "ctx_retranslate" to "더 많은 맥락으로 재번역",
+            "connected_users" to "접속자",
+            "btn_enable_notifs" to "알림 활성화",
+            "btn_disable_notifs" to "알림 비활성화",
+            "btn_share_link" to "채팅 링크 공유",
+            "connection_restored" to "연결됨",
+            "you" to "나",
+            "server_host" to "호스트",
+            "btn_export" to "채팅 내보내기",
+            "ctx_cancel_reply" to "답장 취소",
+            "ctx_view_translation" to "번역 보기",
+            "retranslating" to "재번역 중…",
+            "ctx_prev_translation" to "이전 번역 보기",
+            "ctx_view_latest" to "최신 번역 보기",
             "qc_where_do_you_live"      to "지금은 어디에 사세요?",
             "qc_how_long_been_here"     to "여기 오신 지 얼마나 되셨나요?",
             "qc_visiting_or_local"      to "방문 중이세요, 아니면 여기 사세요?",
             "qc_what_do_for_work"       to "어떤 일을 하세요?",
             "qc_what_are_hobbies"       to "취미가 뭔가요?",
             "qc_have_you_traveled"      to "여행을 많이 다니셨나요?",
+            "qc_what_languages_speak"   to "다른 언어도 하실 수 있으신가요?",
+            "qc_whats_in_profile_pic"   to "프로필 사진에 뭐가 있나요?",
+            "qc_do_you_enjoy_work"      to "일이 즐거우신가요?",
             "qc_what_brings_you_here"   to "오늘 여기는 어떤 일로 오셨나요?",
             "qc_first_time_here"        to "여기 처음 오셨나요?",
             "qc_how_did_you_hear"       to "이곳을 어떻게 알게 되셨나요?",
             "qc_here_alone_friends"     to "혼자 오셨나요, 아니면 친구들과 함께 오셨나요?",
             "qc_how_long_staying"       to "얼마나 계실 예정인가요?",
+            "qc_what_is_area_known_for" to "이 지역은 무엇으로 유명한가요?",
             "qc_what_think_of_place"    to "이 장소가 어떤 것 같으세요?",
             "qc_do_you_know_anyone"     to "여기서 아는 분이 있으신가요?",
             "qc_what_music_like"        to "어떤 음악을 좋아하세요?",
@@ -533,34 +567,16 @@ $uiStrings"""
         )
 
         val UI_STRINGS_JA = mapOf(
-            "chat_title" to "チャット",
-            "lang_title" to "言語を選択してください",
             "setup_username" to "ユーザー名を入力",
             "setup_username_hint" to "名前を入力してください",
             "setup_avatar" to "プロフィール画像（任意）",
             "btn_choose_photo" to "写真を選ぶ",
-            "btn_skip" to "スキップ",
             "btn_join" to "チャットに参加",
+            "chat_title" to "チャット",
             "chat_placeholder" to "メッセージを入力…",
             "btn_send" to "送信",
-            "btn_export" to "チャットをエクスポート",
             "translating" to "翻訳中…",
-            "retranslating" to "再翻訳中…",
-            "ctx_view_original" to "原文を見る",
-            "ctx_view_translation" to "翻訳を見る",
-            "ctx_retranslate" to "より多くの文脈で再翻訳",
-            "ctx_prev_translation" to "前の翻訳を見る",
-            "ctx_reply" to "返信",
-            "ctx_cancel_reply" to "返信をキャンセル",
-            "connected_users" to "接続ユーザー",
             "connection_lost" to "接続が切れました。再接続中…",
-            "connection_restored" to "接続済み",
-            "you" to "あなた",
-            "server_host" to "ホスト",
-            "welcome" to "チャットへようこそ！",
-            "no_messages" to "まだメッセージはありません。",
-            "ctx_view_latest" to "最新の翻訳を表示",
-            "ctx_copy_message" to "メッセージをコピー",
             "qc_title" to "クイックチャット",
             "qc_cat_conversation" to "会話",
             "qc_cat_about_you" to "あなたについて",
@@ -568,24 +584,43 @@ $uiStrings"""
             "qc_cat_common_ground" to "共通の話題",
             "qc_cat_spend_time" to "一緒に過ごす",
             "qc_cat_wrapping_up" to "締めくくり",
+            "qc_pronounce_my_name"      to "はじめまして。まず自分の名前を声に出して言いますね。",
             "qc_translation_unclear"    to "どういう意味ですか？翻訳がわかりにくかったです。",
             "qc_say_more_simply"        to "もっとシンプルに言っていただけますか？",
-            "qc_slow_down"              to "少しゆっくり話せますか？",
-            "qc_still_learning"         to "この言語をまだ勉強中です。ご辛抱ください。",
-            "qc_what_language_prefer"   to "一番使いやすい言語はどれですか？",
-            "qc_did_not_understand"     to "さきほどのメッセージが理解できませんでした。",
-            "qc_where_are_you_from"     to "もともとどちらのご出身ですか？",
+            "qc_think_app_interesting"  to "このアプリは面白いと思います。",
+            "qc_do_you_have_internet"   to "インターネットに接続できますか？",
+            "ctx_reply" to "返信",
+            "ctx_copy_message" to "メッセージをコピー",
+            "ctx_view_original" to "原文を見る",
+            "ctx_retranslate" to "より多くの文脈で再翻訳",
+            "connected_users" to "接続ユーザー",
+            "btn_enable_notifs" to "通知を有効にする",
+            "btn_disable_notifs" to "通知を無効にする",
+            "btn_share_link" to "チャットリンクを共有",
+            "connection_restored" to "接続済み",
+            "you" to "あなた",
+            "server_host" to "ホスト",
+            "btn_export" to "チャットをエクスポート",
+            "ctx_cancel_reply" to "返信をキャンセル",
+            "ctx_view_translation" to "翻訳を見る",
+            "retranslating" to "再翻訳中…",
+            "ctx_prev_translation" to "前の翻訳を見る",
+            "ctx_view_latest" to "最新の翻訳を表示",
             "qc_where_do_you_live"      to "今はどこに住んでいますか？",
             "qc_how_long_been_here"     to "こちらに来てどのくらいになりますか？",
             "qc_visiting_or_local"      to "旅行中ですか、それともここに住んでいますか？",
             "qc_what_do_for_work"       to "どのようなお仕事をしていますか？",
             "qc_what_are_hobbies"       to "趣味は何ですか？",
             "qc_have_you_traveled"      to "旅行はよくされますか？",
+            "qc_what_languages_speak"   to "他にどんな言語が話せますか？",
+            "qc_whats_in_profile_pic"   to "プロフィール写真には何が写っていますか？",
+            "qc_do_you_enjoy_work"      to "お仕事は楽しいですか？",
             "qc_what_brings_you_here"   to "今日はどういったご用件でいらっしゃいましたか？",
             "qc_first_time_here"        to "ここに来るのは初めてですか？",
             "qc_how_did_you_hear"       to "こちらをどうやって知りましたか？",
             "qc_here_alone_friends"     to "おひとりですか、それともお友達と一緒ですか？",
             "qc_how_long_staying"       to "どのくらい滞在される予定ですか？",
+            "qc_what_is_area_known_for" to "この地域は何で有名ですか？",
             "qc_what_think_of_place"    to "この場所はいかがですか？",
             "qc_do_you_know_anyone"     to "ここで知っている方はいますか？",
             "qc_what_music_like"        to "どんな音楽が好きですか？",

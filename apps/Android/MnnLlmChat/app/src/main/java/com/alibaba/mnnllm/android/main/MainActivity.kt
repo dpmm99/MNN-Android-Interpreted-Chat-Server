@@ -389,6 +389,12 @@ class MainActivity : AppCompatActivity(), MainFragmentManager.FragmentLifecycleL
                 if (drawerLayout.isDrawerOpen(GravityCompat.START)) {
                     drawerLayout.closeDrawer(GravityCompat.START)
                 } else {
+                    // Let the current fragment attempt to handle the back press
+                    val fragment = currentFragment
+                    if (fragment is BackPressHandler && fragment.handleBackPress()) {
+                        return // Fragment consumed the back press
+                    }
+
                     finish()
                 }
             }
@@ -399,8 +405,8 @@ class MainActivity : AppCompatActivity(), MainFragmentManager.FragmentLifecycleL
         
         val menuHost: MenuHost = this
         menuHost.addMenuProvider(menuProvider, this, Lifecycle.State.RESUMED)
-        
-        // Handle intent extras for navigation from notification
+
+        // Handle intent extras for navigation from notification or home screen shortcut
         handleIntentExtras(intent)
     }
     
@@ -411,6 +417,36 @@ class MainActivity : AppCompatActivity(), MainFragmentManager.FragmentLifecycleL
                 // Post to ensure the UI is ready
                 bottomNav.post {
                     bottomNav.select(BottomTabBar.Tab.MODEL_MARKET)
+                }
+            }
+
+            if (it.action == "ACTION_START_FROZEN_SERVER") {
+                val mode = it.getStringExtra("FROZEN_MODE") ?: return
+                val modelId = it.getStringExtra("FROZEN_MODEL_ID")
+                val username = it.getStringExtra("FROZEN_USERNAME")
+                val language = it.getStringExtra("FROZEN_LANGUAGE")
+                val avatarPath = it.getStringExtra("FROZEN_AVATAR_PATH")
+            
+                var avatarBase64: String? = null
+                if (avatarPath != null && java.io.File(avatarPath).exists()) {
+                    avatarBase64 = java.io.File(avatarPath).readText()
+                }
+
+                // Temporarily save these directly to SharedPreferences or a Singleton 
+                // so ChatServerFragment knows to bypass manual setup and start immediately.
+                val prefs = getSharedPreferences("ChatServerAutoStart", Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putBoolean("AUTO_START", true)
+                    .putString("MODE", mode)
+                    .putString("MODEL_ID", modelId)
+                    .putString("USERNAME", username)
+                    .putString("LANGUAGE", language)
+                    .putString("AVATAR", avatarBase64)
+                    .apply()
+
+                // Navigate to the server tab
+                bottomNav.post {
+                    bottomNav.select(BottomTabBar.Tab.CHAT_SERVER)
                 }
             }
         }
@@ -526,5 +562,9 @@ class MainActivity : AppCompatActivity(), MainFragmentManager.FragmentLifecycleL
         
         // Control whether to show privacy policy agreement dialog
         const val ENABLE_PRIVACY_POLICY_CHECK = false
+    }
+
+    interface BackPressHandler {
+        fun handleBackPress(): Boolean
     }
 }

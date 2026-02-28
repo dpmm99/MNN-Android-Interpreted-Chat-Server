@@ -128,7 +128,8 @@ android {
                 'META-INF/io.netty.versions.properties',
                 'META-INF/DEPENDENCIES',
                 'META-INF/LICENSE',
-                'META-INF/MANIFEST.MF'
+                'META-INF/MANIFEST.MF',
+                'META-INF/versions/9/OSGI-INF/MANIFEST.MF'
         ])
         // Exclude large model files from compression
         jniLibs {
@@ -226,4 +227,6 @@ dependencies {
     testImplementation "org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2"
     debugImplementation 'com.facebook.stetho:stetho:1.6.0'
     debugImplementation 'com.facebook.stetho:stetho-okhttp3:1.6.0'
+
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.83")
 }

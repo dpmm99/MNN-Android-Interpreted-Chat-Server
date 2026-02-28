@@ -1,9 +1,11 @@
 package com.alibaba.mnnllm.android.hotspot
 
 import android.content.Context
+import android.net.wifi.SoftApConfiguration
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiManager.LocalOnlyHotspotCallback
 import android.net.wifi.WifiManager.LocalOnlyHotspotReservation
+import android.net.wifi.WifiSsid
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -45,7 +47,7 @@ class LocalHotspotManager(context: Context) {
      * The hotspot stays alive as long as the flow is collected. Cancel the
      * coroutine (or let the flow complete) to release the reservation.
      */
-    fun hotspotInfoFlow(): Flow<Result<HotspotInfo>> = callbackFlow {
+    fun hotspotInfoFlow(ssid: String? = null, password: String? = null): Flow<Result<HotspotInfo>> = callbackFlow {
         var reservation: LocalOnlyHotspotReservation? = null
 
         val callback = object : LocalOnlyHotspotCallback() {
@@ -68,6 +70,40 @@ class LocalHotspotManager(context: Context) {
             override fun onFailed(reason: Int) {
                 trySend(Result.failure(IllegalStateException("Hotspot failed to start, reason=$reason")))
                 close()
+            }
+        }
+
+        // If running on TIRAMISU+ and caller provided SSID/password, attempt to apply a SoftApConfiguration.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && (!ssid.isNullOrBlank() || !password.isNullOrBlank())) {
+            try {
+                // SoftApConfiguration.Builder is hidden (@SystemApi) before API 36, requiring reflection to compile. Allegedly...
+                val builderClass = Class.forName("android.net.wifi.SoftApConfiguration\$Builder")
+                val builder = builderClass.getDeclaredConstructor().newInstance()
+
+                if (!ssid.isNullOrBlank()) {
+                    val wifiSsid = WifiSsid.fromBytes(ssid.toByteArray(Charsets.UTF_8))  // API 33+
+                    val setWifiSsidMethod = builderClass.getMethod("setWifiSsid", WifiSsid::class.java)
+                    setWifiSsidMethod.invoke(builder, wifiSsid)
+                }
+
+                if (!password.isNullOrBlank()) {
+                    // Use WPA3 when a passphrase is provided
+                    val setPassphraseMethod = builderClass.getMethod("setPassphrase", String::class.java, Int::class.java)
+                    setPassphraseMethod.invoke(builder, password, SoftApConfiguration.SECURITY_TYPE_WPA3_SAE)
+                }
+
+                val buildMethod = builderClass.getMethod("build")
+                val cfg = buildMethod.invoke(builder)
+
+                try {
+                    // WifiManager.setSoftApConfiguration is also @SystemApi
+                    val setConfigMethod = wifiManager.javaClass.getMethod("setSoftApConfiguration", SoftApConfiguration::class.java)
+                    setConfigMethod.invoke(wifiManager, cfg)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Unable to set SoftApConfiguration (may require system privileges)", e)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to build/apply SoftApConfiguration", e)
             }
         }
 

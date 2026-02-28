@@ -1,6 +1,7 @@
 package com.alibaba.mnnllm.android.hotspot
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.util.Log
 import com.alibaba.mnnllm.android.llm.ChatService
 import com.alibaba.mnnllm.android.llm.LlmSession
@@ -14,11 +15,13 @@ import io.ktor.server.application.Application
 import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.engine.sslConnector
 import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
@@ -38,11 +41,31 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.FileInputStream
+import java.math.BigInteger
+import java.security.KeyPairGenerator
+import java.security.KeyStore
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.Date
+import javax.net.ssl.KeyManagerFactory
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 
 private const val TAG = "ChatServerManager"
+
+/** Plain HTTP port — default for all clients. */
 const val CHAT_SERVER_PORT = 8765
+
+/**
+ * HTTPS port — only used when the client explicitly requests it (e.g. to
+ * enable Web Notifications, which require a secure context).
+ * The client JS detects `location.protocol === 'https:'` to know which port
+ * it loaded from and routes all API calls accordingly.
+ */
+const val CHAT_SERVER_PORT_HTTPS = 8766
 
 /**
  * The fixed userId used for every client connecting from the loopback address
@@ -60,8 +83,10 @@ const val HOST_USER_ID = "host"
  *
  * Lifecycle:
  *   1. Call [start] with a model config path.
- *   2. The server listens on [CHAT_SERVER_PORT] from all interfaces (0.0.0.0).
- *   3. Clients connect via the hotspot IP printed in [HotspotConnectionInfo.urlQrContent].
+ *   2. The server listens on [CHAT_SERVER_PORT] (HTTP) from all interfaces AND
+ *      on [CHAT_SERVER_PORT_HTTPS] (HTTPS) simultaneously.
+ *   3. Clients default to HTTP. They switch to HTTPS only if they want to use
+ *      Web Notifications (which require a secure context).
  *   4. Call [stop] to shut everything down.
  *
  * Multi-tab / multi-browser support for the host device:
@@ -81,6 +106,8 @@ class ChatServerManager private constructor(private val context: Context) {
     private val messages = mutableListOf<ChatMessage>()                // in arrival order
     private val translations = ConcurrentHashMap<String, MessageTranslation>() // "msgId:lang" → translation
     private val uiTranslations = ConcurrentHashMap<String, Map<String, String>>() // lang → key→value
+    private var cachedWifiQrPng: ByteArray? = null
+    private var cachedUrlQrPng: ByteArray? = null
 
     /**
      * Tracks how many active SSE connections exist per userId.
@@ -111,8 +138,13 @@ class ChatServerManager private constructor(private val context: Context) {
     // ── Coroutine scope ────────────────────────────────────────────────────────
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // ── Ktor server ────────────────────────────────────────────────────────────
-    private var server: io.ktor.server.engine.EmbeddedServer<*, *>? = null
+    // ── Ktor servers ───────────────────────────────────────────────────────────
+    /** Plain HTTP server on [CHAT_SERVER_PORT]. Always started. */
+    private var httpServer: io.ktor.server.engine.EmbeddedServer<*, *>? = null
+
+    /** TLS/HTTPS server on [CHAT_SERVER_PORT_HTTPS]. Started when a certificate is available. */
+    private var httpsServer: io.ktor.server.engine.EmbeddedServer<*, *>? = null
+
     private var chatService: ChatService? = null
     private var llmSession: LlmSession? = null
     private var translationManager: TranslationManager? = null
@@ -127,7 +159,11 @@ class ChatServerManager private constructor(private val context: Context) {
                 val enJson = gson.toJson(TranslationManager.UI_STRINGS_EN)
                 val koJson = gson.toJson(TranslationManager.UI_STRINGS_KO)
                 val jaJson = gson.toJson(TranslationManager.UI_STRINGS_JA)
-                val injection = "<script>window.__BUILTIN_UI_STRINGS__ = { en: $enJson, ko: $koJson, ja: $jaJson };</script>"
+                // Inject the HTTPS port so the client can build the correct upgrade URL.
+                val injection = """<script>
+window.__BUILTIN_UI_STRINGS__ = { en: $enJson, ko: $koJson, ja: $jaJson };
+window.__HTTPS_PORT__ = $CHAT_SERVER_PORT_HTTPS;
+</script>"""
                 html = html.replace("<!--__INJECT_BUILTIN_UI__-->", injection)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to inject builtin UI strings into HTML", e)
@@ -139,18 +175,125 @@ class ChatServerManager private constructor(private val context: Context) {
         }
     }
 
+    private fun generateOrLoadKeyStore(): Pair<KeyStore, String> {
+        val keystoreFile = File(context.filesDir, "server_generated.p12")
+        val password = "runtime_generated"
+
+        if (keystoreFile.exists()) {
+            val ks = KeyStore.getInstance("PKCS12")
+            FileInputStream(keystoreFile).use { ks.load(it, password.toCharArray()) }
+            return Pair(ks, password)
+        }
+
+        // Generate RSA key pair
+        val keyPairGen = KeyPairGenerator.getInstance("RSA")
+        keyPairGen.initialize(2048)
+        val keyPair = keyPairGen.generateKeyPair()
+
+        // Build self-signed cert
+        val now = System.currentTimeMillis()
+        val notBefore = Date(now)
+        val notAfter = Date(now + 365L * 24 * 60 * 60 * 1000 * 3) // 3 years
+        val subject = X500Name("CN=MNNChat,O=Local,C=US")
+        val serial = BigInteger.valueOf(now)
+
+        val certBuilder = JcaX509v3CertificateBuilder(
+            subject, serial, notBefore, notAfter, subject, keyPair.public
+        )
+        val signer = JcaContentSignerBuilder("SHA256WithRSA").build(keyPair.private)
+        val cert = JcaX509CertificateConverter().getCertificate(certBuilder.build(signer))
+
+        // Pack into a PKCS12 keystore
+        val ks = KeyStore.getInstance("PKCS12")
+        ks.load(null, null)
+        ks.setKeyEntry("server", keyPair.private, password.toCharArray(), arrayOf(cert))
+
+        // Persist so we reuse across restarts
+        keystoreFile.outputStream().use { ks.store(it, password.toCharArray()) }
+        Log.i(TAG, "Generated and saved self-signed certificate")
+
+        return Pair(ks, password)
+    }
+
     // ── Public API ─────────────────────────────────────────────────────────────
+    fun getHostUser(): ChatUser? = users[HOST_USER_ID]
 
     fun start(modelId: String, configPath: String) {
-        if (server != null) return
+        if (httpServer != null) return
         loadUiTranslationsCache()
         initLlmSession(modelId, configPath)
-        server = embeddedServer(Netty, host = "0.0.0.0", port = CHAT_SERVER_PORT) {
-            configureKtor()
+
+        scope.launch(Dispatchers.IO) {
+            startHttpServer()
+            startHttpsServer()  // best-effort; failures are non-fatal
+            instance = this@ChatServerManager
         }
-        server!!.start(wait = false)
-        Log.i(TAG, "Chat server started on port $CHAT_SERVER_PORT")
-        instance = this
+    }
+
+    // ── Start plain HTTP server ────────────────────────────────────────────────
+    private suspend fun startHttpServer() {
+        val deadlineMs = System.currentTimeMillis() + 11_000L
+        var lastEx: Exception? = null
+        while (System.currentTimeMillis() <= deadlineMs) {
+            try {
+                val srv = embeddedServer(Netty, host = "0.0.0.0", port = CHAT_SERVER_PORT) {
+                    configureKtor()
+                }
+                srv.start(wait = false)
+                httpServer = srv
+                Log.i(TAG, "HTTP chat server started on port $CHAT_SERVER_PORT")
+                return
+            } catch (e: java.net.BindException) {
+                lastEx = e
+                Log.w(TAG, "HTTP port $CHAT_SERVER_PORT in use, retrying in 2s…", e)
+                try { Thread.sleep(2000L) } catch (_: InterruptedException) {}
+            } catch (e: Exception) {
+                lastEx = e
+                Log.e(TAG, "Failed to start HTTP chat server (non-bind error)", e)
+                break
+            }
+        }
+
+        Log.e(TAG, "Failed to start HTTP chat server after retries", lastEx)
+        val msg = lastEx?.message ?: "Unknown error"
+        try {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    android.widget.Toast.makeText(context, "Chat server failed to start: $msg", android.widget.Toast.LENGTH_LONG).show()
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+    }
+
+    // ── Start HTTPS server (best-effort; no retry loop — cert gen is the likely failure point) ──
+    private fun startHttpsServer() {
+        try {
+            val (keyStore, keystorePassword) = generateOrLoadKeyStore()
+            val aliasEnum = keyStore.aliases()
+            val keyAlias = if (aliasEnum.hasMoreElements()) aliasEnum.nextElement() else null
+                ?: throw Exception("No alias in keystore")
+
+            val srv = embeddedServer(Netty, configure = {
+                sslConnector(
+                    keyStore = keyStore,
+                    keyAlias = keyAlias,
+                    keyStorePassword = { keystorePassword.toCharArray() },
+                    privateKeyPassword = { keystorePassword.toCharArray() },
+                ) {
+                    port = CHAT_SERVER_PORT_HTTPS
+                    host = "0.0.0.0"
+                }
+            }) {
+                configureKtor()
+            }
+            srv.start(wait = false)
+            httpsServer = srv
+            Log.i(TAG, "HTTPS chat server started on port $CHAT_SERVER_PORT_HTTPS")
+        } catch (e: java.net.BindException) {
+            Log.w(TAG, "HTTPS port $CHAT_SERVER_PORT_HTTPS already in use — skipping HTTPS", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start HTTPS server (non-fatal, HTTP still running)", e)
+        }
     }
 
     fun stop() {
@@ -162,8 +305,11 @@ class ChatServerManager private constructor(private val context: Context) {
         debugCollectorJob = null
         _inferenceDebugFlow.value = InferenceDebugState()
 
-        server?.stop(gracePeriodMillis = 500, timeoutMillis = 2000)
-        server = null
+        httpServer?.stop(gracePeriodMillis = 500, timeoutMillis = 2000)
+        httpServer = null
+        httpsServer?.stop(gracePeriodMillis = 500, timeoutMillis = 2000)
+        httpsServer = null
+
         llmSession?.release()
         llmSession = null
         chatService = null
@@ -178,7 +324,7 @@ class ChatServerManager private constructor(private val context: Context) {
         Log.i(TAG, "Chat server stopped")
     }
 
-    fun isRunning() = server != null
+    fun isRunning() = httpServer != null
 
     /** Returns the plain text of a message (used by TranslationManager). */
     fun getMessageText(messageId: String): String? =
@@ -368,6 +514,17 @@ class ChatServerManager private constructor(private val context: Context) {
         }
     }
 
+    fun setCachedQrCodes(wifiQr: Bitmap?, urlQr: Bitmap?) {
+        cachedWifiQrPng = wifiQr?.toPngBytes()
+        cachedUrlQrPng  = urlQr?.toPngBytes()
+    }
+
+    private fun Bitmap.toPngBytes(): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        compress(Bitmap.CompressFormat.PNG, 100, out)
+        return out.toByteArray()
+    }
+
     // ── Ktor configuration ─────────────────────────────────────────────────────
 
     private fun Application.configureKtor() {
@@ -389,6 +546,20 @@ class ChatServerManager private constructor(private val context: Context) {
         // ── Serve HTML app ──────────────────────────────────────────────────
         get("/") {
             call.respondText(chatHtml, ContentType.Text.Html)
+        }
+
+        // ── Serve service worker JS ─────────────────────────────────────────
+        get("/service_worker.js") {
+            try {
+                val js = context.assets.open("service_worker.js").bufferedReader().readText()
+                call.response.headers.append("Service-Worker-Allowed", "/")
+                // Must NOT be cached — browser must always fetch the latest version.
+                call.response.headers.append(HttpHeaders.CacheControl, "no-store")
+                call.respondText(js, ContentType.parse("application/javascript"))
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to serve service_worker.js", e)
+                call.respond(HttpStatusCode.NotFound)
+            }
         }
 
         // ── Host identity ────────────────────────────────────────────────────
@@ -636,6 +807,17 @@ class ChatServerManager private constructor(private val context: Context) {
             val avatarData = users[userId]?.avatarBase64
             if (!avatarData.isNullOrEmpty()) {
                 call.respondText(avatarData, ContentType.Text.Plain)
+            } else {
+                call.respond(HttpStatusCode.NotFound)
+            }
+        }
+        
+        // ── Share the QR codes ─────────────────────────────────────────────
+        get("/api/qr") {
+            val which = call.request.queryParameters["which"] ?: "url"
+            val bytes = if (which == "wifi") cachedWifiQrPng else cachedUrlQrPng
+            if (bytes != null) {
+                call.respondBytes(bytes, ContentType.Image.PNG)
             } else {
                 call.respond(HttpStatusCode.NotFound)
             }

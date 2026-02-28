@@ -2,7 +2,7 @@
 
 A fork of [alibaba/MNN](https://github.com/alibaba/MNN) modifying their MNN Chat app for Android into a multi-user chat server with on-device LLM-powered interpretation.
 
-Specifically, this modification adds a Wi-Fi hotspot mode, wherein the app hosts a text-based chatroom for multiple nearby users, with automatic language translation using the LLM of your choice.
+Specifically, this modification allows the app to host a text-based chatroom for multiple nearby users, either via a dedicated Wi-Fi hotspot or an existing Wi-Fi network, with automatic language translation using the LLM of your choice.
 
 ## LLM Support
 
@@ -14,23 +14,31 @@ Any LLM supported by MNN Chat can be used as the interpreter. Of those, both non
 - Any language supported by the LLM is also supported by the app, in theory.
 - All web UI text (outside of the language selection screen) has 3 hard-coded languages and will auto-translate on demand when a user selects a language for which it lacks a translation.
 - Automatic UI translations are saved in the app cache for later reuse.
-- The UI translation pipeline includes a few regular expressions to repair malformed JSON, since LLMs (especially small ones that are also quantized) often produce slightly incorrect output.
+- The UI translation pipeline includes a few regular expressions and heuristics to repair malformed JSON and halt generation early if the output devolves into a repetitive 1-3 token cycle, since LLMs (especially small ones that are also quantized) often produce slightly incorrect or looping output.
 
 ## Connecting
 
-Users scan the top QR code to connect to the server as a hotspot/router. If the host device has no internet connection, each user has to select "connect only this time" or "stay connected" on Android when prompted.
-After connecting, users scan the bottom QR code to navigate to the chat web page using the web browser of their choice--they don't have to have this app, nor do they need to have internet access.
+The server can be started in either "hotspot" mode or "use existing Wi-Fi network" mode. A home screen shortcut can be generated to quickly launch the server with your current settings.
+
+Depending on the mode, connecting works as follows:
+- **Hotspot Mode:** The host can configure a custom SSID and passphrase. Users scan the top QR code to connect to the server as a hotspot/router. If the host device has no internet connection, each user has to select "connect only this time" or "stay connected" on Android when prompted.
+- **Existing Wi-Fi:** Users simply connect to the same local network as the host--on a plane, in a café, on a ship, wherever.
+
+After connecting to the network, users scan the bottom QR code to navigate to the chat web page using the web browser of their choice. They don't have to have this app, nor do they need to have internet access. Connected users can also share the QR code(s) directly from their own screens to onboard newcomers.
+
+*Note on HTTPS:* While HTTP is used by default for ease of access, HTTPS is enabled and could allow push notifications and vibration when the browser is out-of-focus on connected client devices, but users would have to manually install the certificate in their device's trust store. It's complicated and inconvenient, so the UI doesn't directly support this.
 
 ## Chat Features
 
-- Users must enter a name and may select a profile picture before joining.
+- Users must enter a name and may select a profile picture before joining. Names and avatars can be updated later directly from the user list, and any avatar can be clicked to view a larger version (up to ~1 MP).
 - Newcomers receive the full chat history (since the server was last started), translated into their language from newest to oldest (but lower priority than newly sent messages).
 - Messages are primarily plain text, but there is support for replying to a specific message.
 - Via the context menu, any message can be retranslated using one additional previous message as context for improved accuracy. Each message is initially translated with no context other than the languages.
 - For any message, you can view the original text, the previous translation, or the current translation.
 - You can view the current chat participants from the web UI.
 - You can export the chat, including the original language and the auto-translated version of each message.
-- The host may chat within the app, where they can easily scroll to the QR codes or the latest LLM input/output, or in their default browser.
+- Push notifications and vibration upon message receipt are natively supported on the host device.
+- The host may chat within the app, where they can easily scroll to the QR codes or the latest LLM input/output, or in their default browser. The in-app WebView supports most of the same features.
 - The web app listens for broadcast events and updates the UI immediately when a translation is ready.
 - The server continues running in the background as long as the OS does not terminate it due to low resources.
 
