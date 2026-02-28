@@ -51,7 +51,8 @@ sealed class TranslationTask(val priority: Int) : Comparable<TranslationTask> {
         val chunk: Map<String, String>,
         val repairTriesAllowed: Int = 1,
         val isRepair: Boolean = false,
-        val rawBadJson: String? = null
+        val rawBadJson: String? = null,
+        val temperature: Float = 0f,
     ) : TranslationTask(if (chunkIndex < 2) 0 else 4) { // Lowest priority for later chunks (mainly quick chat); highest priority for the earliest chunks (chat, reply, basic stuff like that).
         override val key get() = "ui:$language:$chunkIndex:${if(isRepair) "repair" else "initial"}"
         override fun compareTo(other: TranslationTask): Int {

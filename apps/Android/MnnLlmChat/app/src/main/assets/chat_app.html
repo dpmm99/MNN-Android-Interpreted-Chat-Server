@@ -237,10 +237,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <button class="lang-btn" data-lang="pt">🇵🇹 Português</button>
     <button class="lang-btn" data-lang="ar">🇸🇦 العربية</button>
     <button class="lang-btn" data-lang="hi">🇮🇳 हिन्दी</button>
-    <div class="lang-btn lang-other" style="display:flex;align-items:center;gap:8px">
-      <span>✏️</span>
-      <input id="lang-custom" type="text" placeholder="Other language code (e.g. ru)" style="border:none;outline:none;flex:1;font-size:.95em">
-    </div>
+    <button class="lang-btn" data-lang="other" id="btn-lang-other">✏️ Other</button>
+  </div>
+  <div id="lang-custom-row" style="display:none;margin-top:8px">
+      <input id="lang-custom" type="text" placeholder="Other language code (e.g. ru)"
+             style="width:100%;box-sizing:border-box;padding:10px 14px;border:2px solid var(--accent,#6c63ff);border-radius:10px;font-size:1em;outline:none">
   </div>
   <button class="btn-primary" id="btn-lang-next">Next →</button>
 </div>
@@ -542,16 +543,30 @@ const _rotatingNextButtons = [
   "མུ་མཐུད། →",
 ];
 
+const _rotatingOtherButtons = [
+  "✏️ Other","✏️ 其他","✏️ अन्य","✏️ Outro","✏️ Другое","✏️ أخرى",
+  "✏️ Autre","✏️ Andere","✏️ इतर","✏️ অন্য","✏️ Otro","✏️ Lainnya",
+  "✏️ Khác","✏️ อื่นๆ","✏️ 기타","✏️ その他","✏️ Diğer","✏️ ਹੋਰ",
+  "✏️ மற்றவை","✏️ Nyingine","✏️ Altro","✏️ Andere","✏️ Iba pa",
+  "✏️ Інша","✏️ دیگری","✏️ دوسری","✏️ Annen","✏️ Anden","✏️ Annan",
+  "✏️ Muu","✏️ Más","✏️ Inne","✏️ Jiný","✏️ Iný","✏️ Drugi",
+  "✏️ Άλλο","✏️ სხვა","✏️ Boshqa","✏️ Басқа","✏️ ሌላ","✏️ אחר",
+  "✏️ ອື່ນໆ","✏️ အခြား","✏️ ផ្សេង","✏️ වෙනත්","✏️ གཞན།",
+];
+
 let _rotIdx = 0;
 function startUiCycler(intervalMs = 650) {
   setInterval(() => {
     _rotIdx = (_rotIdx + 1) % _rotatingLangTitles.length;
-    const title = document.getElementById('txt-lang-title');
+    const title  = document.getElementById('txt-lang-title');
     const custom = document.getElementById('lang-custom');
-    const next = document.getElementById('btn-lang-next');
-    if (title) title.textContent = _rotatingLangTitles[_rotIdx];
-    if (custom) custom.placeholder = _rotatingOtherPlaceholders[_rotIdx];
-    if (next) next.textContent = _rotatingNextButtons[_rotIdx];
+    const next   = document.getElementById('btn-lang-next');
+    const other  = document.getElementById('btn-lang-other');
+    if (title)  title.textContent       = _rotatingLangTitles[_rotIdx];
+    if (custom) custom.placeholder      = _rotatingOtherPlaceholders[_rotIdx];
+    if (next)   next.textContent        = _rotatingNextButtons[_rotIdx];
+    if (other && !other.classList.contains('sel'))
+                other.textContent       = _rotatingOtherButtons[_rotIdx];
   }, intervalMs);
 }
 
@@ -696,7 +711,7 @@ function swNotify(msg) {
 
 // Trigger UI translation immediately for non-builtin languages. No need to await.
 async function requestUiTranslation(lang) {
-  const builtinLangs = new Set(['en', 'ko', 'ja']);
+  const builtinLangs = new Set(Object.keys(uiStrings));
   if (!builtinLangs.has(lang)) {
     showUiTranslatingBanner();
     try {
@@ -718,20 +733,30 @@ async function requestUiTranslation(lang) {
 function initLangScreen() {
   // Auto-detect browser language.
   const detected = (navigator.language || 'en').split('-')[0].toLowerCase();
+  const customRow = document.getElementById('lang-custom-row');
+  const customInput = document.getElementById('lang-custom');
+
   document.querySelectorAll('.lang-btn[data-lang]').forEach(b => {
     if (b.dataset.lang === detected) b.classList.add('sel');
     b.addEventListener('click', () => {
       document.querySelectorAll('.lang-btn').forEach(x => x.classList.remove('sel'));
       b.classList.add('sel');
-      document.getElementById('lang-custom').value = '';
+      if (b.dataset.lang === 'other') {
+        customRow.style.display = 'block';
+        customInput.focus();
+      } else {
+        customRow.style.display = 'none';
+        customInput.value = '';
+      }
     });
   });
+
   if (uiStrings[detected]) applyUiLang(detected);
 
   document.getElementById('btn-lang-next').addEventListener('click', async () => {
-    const custom = document.getElementById('lang-custom').value.trim().toLowerCase();
+    const custom = customInput.value.trim().toLowerCase();
     const sel = document.querySelector('.lang-btn.sel');
-    const lang = custom || (sel && sel.dataset.lang) || detected || 'en';
+    const lang = custom || (sel && sel.dataset.lang !== 'other' && sel.dataset.lang) || detected || 'en';
     applyUiLang(lang);
     showScreen('screen-setup');
     connectSSE(); // Ensure translation arrives on this screen when it's ready
@@ -897,6 +922,16 @@ function handleEvent(ev){
       if (ev.uiTranslations) {
         mergeUiTranslations(ev.uiTranslations.language, ev.uiTranslations.translations); // We now only receive our own selected language at this time.
         if (ev.uiTranslations.language === myLanguage) applyUiLang(myLanguage);
+      }
+      // If the server restarted it will have lost our registration (users map was cleared).
+      // Re-join silently so subsequent message sends don't return 401 Unauthorized.
+      if (myUsername && !ev?.users?.[myUserId]) {
+        postApi('/api/join', {
+          userId: myUserId,
+          username: myUsername,
+          language: myLanguage,
+          avatar: myAvatarBase64,
+        }).catch(e => console.error('Re-join after server restart failed', e));
       }
       renderAllMessages();
       updateUserList();
@@ -1353,12 +1388,41 @@ function openCtxMenu(e,msgId){
     prevItem.style.display = 'none';
   }
 
+  // Position nicely
   const menu=document.getElementById('ctx-menu');
-  menu.style.left=Math.min(e.clientX,window.innerWidth-220)+'px';
-  menu.style.top=Math.min(e.clientY,window.innerHeight-200)+'px';
+  const overlay=document.getElementById('overlay');
+  const menuWasHidden = menu.style.display==='none'||getComputedStyle(menu).display==='none';
+  const prevDisplay = menu.style.display;
+  if (menuWasHidden) menu.style.display = 'block';
+
+  const menuRect=menu.getBoundingClientRect();
+  const menuW=Math.ceil(menuRect.width);
+  const menuH=Math.ceil(menuRect.height);
+
+  const padding=8;
+  const vw=window.innerWidth;
+  const vh=window.innerHeight;
+  let left=Math.min(e.clientX,vw-menuW-padding);
+  let top=Math.min(e.clientY,vh-menuH-padding);
+  left=Math.max(padding,left);
+  top=Math.max(padding,top);
+  menu.style.left=left+'px';
+  menu.style.top=top+'px';
+
   menu.classList.add('open');
-  document.getElementById('overlay').classList.add('open');
+  overlay.classList.add('open');
+  menu.style.display=(!menuWasHidden && prevDisplay) ? prevDisplay : '';
   ctxOpen=true;window.ctxOpen=true;
+
+  // Clear any existing text selection so the context menu opens without
+  // selecting part of a message. Less intrusive than *blocking* selection.
+  try {
+    // Clear selection for modern browsers
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed) sel.removeAllRanges();
+    // IE fallback
+    else if (document.selection && document.selection.empty) document.selection.empty();
+  } catch (ignored) {}
 }
 
 function closeCtxMenu(){

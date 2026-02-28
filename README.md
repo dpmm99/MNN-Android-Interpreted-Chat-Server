@@ -33,6 +33,7 @@ After connecting to the network, users scan the bottom QR code to navigate to th
 - Users must enter a name and may select a profile picture before joining. Names and avatars can be updated later directly from the user list, and any avatar can be clicked to view a larger version (up to ~1 MP).
 - Newcomers receive the full chat history (since the server was last started), translated into their language from newest to oldest (but lower priority than newly sent messages).
 - Messages are primarily plain text, but there is support for replying to a specific message.
+- Pre-written messages available in the Quick Chat menu can be sent as-is or modified before sending. Unmodified Quick Chat messages use the UI translations (hard-coded or translated from English) for better speed and accuracy instead of translating the same text back and forth.
 - Via the context menu, any message can be retranslated using one additional previous message as context for improved accuracy. Each message is initially translated with no context other than the languages.
 - For any message, you can view the original text, the previous translation, or the current translation.
 - You can view the current chat participants from the web UI.

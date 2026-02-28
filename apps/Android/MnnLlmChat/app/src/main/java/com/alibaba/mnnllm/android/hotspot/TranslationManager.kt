@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.Locale
+import java.security.MessageDigest
 
 private const val TAG = "TranslationManager"
 
@@ -41,6 +42,38 @@ class TranslationManager(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val enqueuedKeys = mutableSetOf<String>()
 
+    /**
+     * Tracks enqueued UI translation work at the granularity of individual string keys,
+     * so callers can quickly check whether a specific "$language:$uiKey" is already in
+     * flight without scanning the entire queue.
+     *
+     * Entries are added when a [TranslationTask.UiTranslationTask] chunk is accepted by
+     * [enqueue] and removed when that chunk's task key leaves [enqueuedKeys] (i.e. when
+     * the worker dequeues it).  Because a single chunk covers multiple UI keys, all keys
+     * in the chunk share the same lifetime.
+     *
+     * Guarded by the same [enqueuedKeys] lock.
+     */
+    private val enqueuedUiKeysByLang = mutableSetOf<String>() // "$language:$uiKey"
+
+    /**
+     * Chunks that have permanently failed all retry attempts (for this app session).
+     * Key format for UI text: "$language:<sha1-of-sorted-keys>". We use a hash of the chunk's keys
+     * (the set of UI map keys being translated) rather than the chunk index because
+     * chunks can be re-computed at runtime and indexes may change. Guarded by
+     * [enqueuedKeys] lock. Intentionally NOT cleared in [stop] so that persistently
+     * broken chunks are not retried as long as the same server instance is running.
+     */
+    private val permanentlyFailedChunks = mutableSetOf<String>()
+
+    // Helper: build a stable permanent key for a UI chunk based on language + sorted keys hash
+    private fun uiChunkPermanentKey(language: String, keys: Set<String>): String {
+        val sorted = keys.toList().sorted().joinToString("|")
+        val sha = MessageDigest.getInstance("SHA-1").digest(sorted.toByteArray(Charsets.UTF_8))
+        val hex = sha.joinToString("") { "%02x".format(it) }
+        return "$language:$hex"
+    }
+
     // ── Debug state ────────────────────────────────────────────────────────────
     private val _debugFlow = MutableStateFlow(InferenceDebugState())
     val debugFlow: StateFlow<InferenceDebugState> = _debugFlow.asStateFlow()
@@ -51,8 +84,22 @@ class TranslationManager(
 
     fun enqueue(task: TranslationTask): Boolean {
         val added = synchronized(enqueuedKeys) {
+            // Reject any UI chunk that has permanently failed all retries.
+            if (task is TranslationTask.UiTranslationTask) {
+                val permanentKey = uiChunkPermanentKey(task.language, task.chunk.keys)
+                if (permanentlyFailedChunks.contains(permanentKey)) {
+                    Log.d(TAG, "Ignoring enqueue for permanently failed UI chunk: $permanentKey (chunkIndex=${task.chunkIndex})")
+                    return@synchronized false
+                }
+            }
             if (enqueuedKeys.add(task.key)) {
                 queue.offer(task)
+                // Track per-UI-key enqueue state so callers can cheaply query individual keys.
+                if (task is TranslationTask.UiTranslationTask) {
+                    for (uiKey in task.chunk.keys) {
+                        enqueuedUiKeysByLang.add("${task.language}:$uiKey")
+                    }
+                }
                 true
             } else {
                 false
@@ -61,10 +108,22 @@ class TranslationManager(
         return added
     }
 
+    /**
+     * Returns true if a translation for [uiKey] in [language] is already enqueued
+     * (i.e. a UI chunk containing it is in the queue and not yet processed).
+     * Thread-safe; acquires the [enqueuedKeys] lock.
+     */
+    fun isUiKeyEnqueued(language: String, uiKey: String): Boolean =
+        synchronized(enqueuedKeys) { enqueuedUiKeysByLang.contains("$language:$uiKey") }
+
     fun stop() {
         scope.cancel()
         queue.clear()
-        synchronized(enqueuedKeys) { enqueuedKeys.clear() }
+        synchronized(enqueuedKeys) {
+            enqueuedKeys.clear()
+            enqueuedUiKeysByLang.clear()
+        }
+        permanentlyFailedChunks.clear(); // Allow more retries if the server is restarted, even if the app isn't.
         _debugFlow.value = InferenceDebugState() // reset to idle
     }
 
@@ -76,7 +135,15 @@ class TranslationManager(
             } catch (e: InterruptedException) {
                 break
             }
-            synchronized(enqueuedKeys) { enqueuedKeys.remove(task.key) }
+            synchronized(enqueuedKeys) {
+                enqueuedKeys.remove(task.key)
+                // Remove per-UI-key tracking entries now that the chunk is being processed.
+                if (task is TranslationTask.UiTranslationTask) {
+                    for (uiKey in task.chunk.keys) {
+                        enqueuedUiKeysByLang.remove("${task.language}:$uiKey")
+                    }
+                }
+            }
             try {
                 processTask(task)
             } catch (e: Exception) {
@@ -252,6 +319,10 @@ $uiStrings"""
         // Start a new debug cycle -> overwrite prior debug state
         _debugFlow.value = InferenceDebugState(prompt = prompt, partialOutput = "", idle = false)
 
+        // Apply a nonzero temperature for retry attempts that aren't JSON-repair tasks.
+        if (task.temperature > 0f) {
+            llmSession.updateConfig("""{"temperature": ${task.temperature}}""")
+        }
         try {
             session.generate(prompt, emptyMap(), object : GenerateProgressListener {
                 override fun onProgress(progress: String?): Boolean {
@@ -314,6 +385,11 @@ $uiStrings"""
                 idle = true
             )
             return
+        } finally {
+            // Always restore greedy decoding after a temperature-modified attempt.
+            if (task.temperature > 0f) {
+                llmSession.updateConfig("""{"temperature": 0.0}""")
+            }
         }
 
         // Completed: mark idle but keep the completed partial output visible
@@ -362,19 +438,34 @@ $uiStrings"""
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse UI translations for ${task.language} chunk ${task.chunkIndex}", e)
             
-            // Check bracket count to ensure it actually tried to make a JSON object
+            // Check a few things to ensure it actually *tried* to make a JSON object
             val bracketCount = raw.count { it == '{' || it == '}' }
-            if (bracketCount >= 4 && task.repairTriesAllowed > 0) {
-                Log.w(TAG, "Malformed UI JSON. Enqueuing repair task...")
-                // Enqueue the exact same task but mark as repair and exhaust the retry
+            val hasEscapedQuotes = raw.contains("\\\"")
+            val permanentKey = uiChunkPermanentKey(task.language, task.chunk.keys)
+
+            if ((bracketCount >= 3 || (bracketCount == 2 && hasEscapedQuotes)) && task.repairTriesAllowed > 0) {
+                // Output looks like malformed JSON — attempt a targeted repair pass.
+                Log.w(TAG, "Malformed UI JSON. Enqueuing repair task for chunkIndex=${task.chunkIndex} (permanentKey=$permanentKey)...")
                 enqueue(task.copy(
                     repairTriesAllowed = task.repairTriesAllowed - 1,
                     isRepair = true,
                     rawBadJson = raw
                 ))
+            } else if (task.repairTriesAllowed > 0) {
+                // Output doesn't resemble complete JSON; retry with nonzero temperature
+                // so the model samples a different path.
+                Log.w(TAG, "UI translation produced no JSON. Enqueuing temperature retry (t=0.9) for chunkIndex=${task.chunkIndex} (permanentKey=$permanentKey)")
+                enqueue(task.copy(
+                    repairTriesAllowed = task.repairTriesAllowed - 1,
+                    temperature = 0.9f
+                ))
             } else {
-                Log.e(TAG, "Repair condition not met or retries exhausted. Skipping chunk.")
-				//TODO: Handle by using English until the app restarts, to avoid wasting power retrying repeatedly.
+                // All retry paths exhausted. Permanently suppress future attempts for
+                // this chunk so we don't waste power retrying in the same session.
+                Log.e(TAG, "All retries exhausted for UI chunk chunkIndex=${task.chunkIndex} (permanentKey=$permanentKey). Permanently blacklisting.")
+                synchronized(enqueuedKeys) {
+                    permanentlyFailedChunks.add(permanentKey)
+                }
             }
         }
     }
@@ -491,6 +582,15 @@ $uiStrings"""
          */
         val STRING_CHUNKS: List<Map<String, String>> by lazy {
             buildChunks(UI_STRINGS_EN)
+        }
+
+        /** Built-in UI strings keyed by language code, for languages we ship translations for. */
+        val BUILTIN_UI_STRINGS: Map<String, Map<String, String>> by lazy {
+            mapOf(
+                "en" to UI_STRINGS_EN,
+                "ko" to UI_STRINGS_KO,
+                "ja" to UI_STRINGS_JA,
+            )
         }
 
         val UI_STRINGS_KO = mapOf(

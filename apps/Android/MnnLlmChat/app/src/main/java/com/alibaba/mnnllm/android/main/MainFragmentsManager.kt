@@ -1,4 +1,4 @@
-package com.alibaba.mnnllm.android.main
+﻿package com.alibaba.mnnllm.android.main
 
 import android.os.Bundle
 import android.util.Log
@@ -48,14 +48,30 @@ class MainFragmentManager(
             benchmarkFragment = BenchmarkFragment()
             chatServerFragment = ChatServerFragment()
 
+            // On a warm start the launcher may recreate the Activity with no savedInstanceState,
+            // but processLastTab (a JVM static field) still holds the last-selected tab from
+            // this process's lifetime. On a true cold start processLastTab is null → LOCAL_MODELS.
+            val targetFragment: Fragment = when (processLastTab) {
+                BottomTabBar.Tab.MODEL_MARKET -> modelMarketFragment!!
+                BottomTabBar.Tab.BENCHMARK -> benchmarkFragment!!
+                BottomTabBar.Tab.CHAT_SERVER -> chatServerFragment!!
+                else -> modelListFragment!!
+            }
+
             activity.supportFragmentManager.beginTransaction()
-                .add(containerId, chatServerFragment!!, TAG_CHAT_SERVER).hide(chatServerFragment!!)
-                .add(containerId, benchmarkFragment!!, TAG_BENCHMARK).hide(benchmarkFragment!!)
-                .add(containerId, modelMarketFragment!!, TAG_MARKET).hide(modelMarketFragment!!)
-                .add(containerId, modelListFragment!!, TAG_LIST) //Default display
+                .add(containerId, chatServerFragment!!, TAG_CHAT_SERVER)
+                .add(containerId, benchmarkFragment!!, TAG_BENCHMARK)
+                .add(containerId, modelMarketFragment!!, TAG_MARKET)
+                .add(containerId, modelListFragment!!, TAG_LIST)
+                .also { tx ->
+                    if (targetFragment !== chatServerFragment) tx.hide(chatServerFragment!!)
+                    if (targetFragment !== benchmarkFragment) tx.hide(benchmarkFragment!!)
+                    if (targetFragment !== modelMarketFragment) tx.hide(modelMarketFragment!!)
+                    if (targetFragment !== modelListFragment) tx.hide(modelListFragment!!)
+                }
                 .commit()
 
-            activeFragment = modelListFragment
+            activeFragment = targetFragment
         } else {
             modelListFragment = activity.supportFragmentManager.findFragmentByTag(TAG_LIST) as? ModelListFragment
             modelMarketFragment = activity.supportFragmentManager.findFragmentByTag(TAG_MARKET) as? ModelMarketFragment
@@ -73,6 +89,9 @@ class MainFragmentManager(
 
         setupTabListener()
         val initialTab = getTabForFragment(activeFragment)
+        // Keep processLastTab in sync so that any subsequent recreation within this
+        // process (e.g. another launcher tap) also lands on the correct tab.
+        processLastTab = initialTab
         bottomNav.select(initialTab)
         listener.onTabChanged(initialTab)
     }
@@ -112,6 +131,7 @@ class MainFragmentManager(
     }
 
     private fun switchFragment(targetFragment: Fragment) {
+        processLastTab = getTabForFragment(targetFragment)
         activity.supportFragmentManager.beginTransaction().apply {
             if (activeFragment != null) {
                 hide(activeFragment!!)
@@ -138,5 +158,17 @@ class MainFragmentManager(
         private const val TAG_BENCHMARK = "benchmark"
         private const val TAG_CHAT_SERVER = "chat_server"
         private const val SAVED_STATE_ACTIVE_TAG = "active_fragment_tag"
+
+        /**
+         * Tracks the last active tab at the process level.
+         *
+         * This is a JVM static field initialized to null. It is null at cold start
+         * (fresh process) so the default LOCAL_MODELS tab is used. On a warm start,
+         * the process survives and this retains the previously selected tab, so a newly
+         * created Activity instance restores the correct tab even when savedInstanceState
+         * is null (as happens when the launcher recreates the Activity via
+         * FLAG_ACTIVITY_RESET_TASK_IF_NEEDED).
+         */
+        private var processLastTab: BottomTabBar.Tab? = null
     }
 }

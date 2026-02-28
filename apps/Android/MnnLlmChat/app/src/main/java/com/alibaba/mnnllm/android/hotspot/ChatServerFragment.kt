@@ -365,6 +365,11 @@ class ChatServerFragment : Fragment(), MainActivity.BackPressHandler {
             allowContentAccess = true
         }
 
+        webView.setOnTouchListener { v, event ->
+            v.parent.requestDisallowInterceptTouchEvent(true)
+            false
+        }
+
         // Intercept page finished to inject a small shim that routes Notification() and vibrate() calls
         // to our Android bridge. The web app calls new Notification(...); we intercept.
         webView.webViewClient = object : WebViewClient() {

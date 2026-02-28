@@ -156,12 +156,10 @@ class ChatServerManager private constructor(private val context: Context) {
             // Inject the Kotlin-side hard-coded UI strings so the client doesn't have to duplicate them.
             // The HTML contains a marker <!--__INJECT_BUILTIN_UI__--> which we replace with an object assignment.
             try {
-                val enJson = gson.toJson(TranslationManager.UI_STRINGS_EN)
-                val koJson = gson.toJson(TranslationManager.UI_STRINGS_KO)
-                val jaJson = gson.toJson(TranslationManager.UI_STRINGS_JA)
+                val builtinJson = gson.toJson(TranslationManager.BUILTIN_UI_STRINGS)
                 // Inject the HTTPS port so the client can build the correct upgrade URL.
                 val injection = """<script>
-window.__BUILTIN_UI_STRINGS__ = { en: $enJson, ko: $koJson, ja: $jaJson };
+window.__BUILTIN_UI_STRINGS__ = $builtinJson;
 window.__HTTPS_PORT__ = $CHAT_SERVER_PORT_HTTPS;
 </script>"""
                 html = html.replace("<!--__INJECT_BUILTIN_UI__-->", injection)
@@ -473,7 +471,7 @@ window.__HTTPS_PORT__ = $CHAT_SERVER_PORT_HTTPS;
      *         cached, or "queued" if at least one chunk was submitted.
      */
     private fun enqueueUiTranslationIfNeeded(language: String): String {
-        if (language in setOf("en", "ko", "ja")) return "builtin"
+        if (language in TranslationManager.BUILTIN_UI_STRINGS.keys) return "builtin"
 
         val cached = uiTranslations[language] ?: emptyMap()
         val allKeys = TranslationManager.UI_STRINGS_EN.keys
@@ -498,19 +496,141 @@ window.__HTTPS_PORT__ = $CHAT_SERVER_PORT_HTTPS;
         return if (cached.isNotEmpty()) "cached" else "queued"
     }
 
+
+    /**
+     * Returns the UI string key whose English value exactly matches [text], or null
+     * if [text] is not a known quick-chat / UI string.
+     *
+     * Lookup order:
+     *   1. Hard-coded English strings (fastest; covers the common case of the sender
+     *      using the English UI).
+     *   2. Hard-coded built-in strings for the sender's own language (ko, ja), so
+     *      that a user sending a quick-chat phrase from a non-English UI is still
+     *      recognised.
+     *   3. The in-memory LLM-translated UI cache for the sender's language (covers
+     *      all other languages whose UI has been translated by the LLM).
+     *
+     * Matching against the source-language strings (steps 2–3) lets us walk back to
+     * the canonical English key, from which we can serve pre-translated strings to
+     * every target language — skipping an LLM call entirely when the translation is
+     * already available or enqueued.
+     */
+    private fun findUiStringKey(messageText: String, sourceLanguage: String): String? {
+        // 1. Direct match against English values (sender wrote in English).
+        TranslationManager.UI_STRINGS_EN.entries.firstOrNull { it.value == messageText }
+            ?.let { return it.key }
+
+        // 2. Match against any other hard-coded built-in language map (en already
+        //    covered above; iterate the rest).
+        if (sourceLanguage != "en") {
+            TranslationManager.BUILTIN_UI_STRINGS[sourceLanguage]
+                ?.entries?.firstOrNull { it.value == messageText }
+                ?.let { return it.key }
+        }
+
+        // 3. Match against the LLM-translated cache for the sender's language.
+        uiTranslations[sourceLanguage]
+            ?.entries?.firstOrNull { it.value == messageText }
+            ?.let { return it.key }
+
+        return null
+    }
+
+    /**
+     * Queues translation work for [msg] so that every connected user whose language
+     * differs from the sender's receives the message in their own language.
+     *
+     * Quick-chat / UI-string shortcut
+     * ──────────────────────────────
+     * If the message text exactly matches a value in [UI_STRINGS_EN] (or its
+     * equivalent in the sender's language), we look up the pre-translated string for
+     * each target language instead of running a full LLM translation:
+     *
+     *  • If the target language already has the string cached → deliver it immediately
+     *    via [onTranslationReady] without touching the LLM queue.
+     *  • If a UI-chunk task for that key is already enqueued → mark the message
+     *    translation as pending; it will be satisfied once that UI chunk completes
+     *    (the client receives the `translation` event from [onTranslationReady]).
+     *    We still need to enqueue a dedicated [MessageTranslationTask] so the result
+     *    is ultimately delivered; but we enqueue it from English for best accuracy.
+     *  • If neither → enqueue a [MessageTranslationTask] translating from English
+     *    (higher resource language → better quality).
+     */
     private fun queueTranslationForAllLanguages(message: ChatMessage) {
         val sourceLanguage = users[message.userId]?.language ?: "en"
         val targetLanguages = users.values.map { it.language }.toSet() - sourceLanguage
+
+        // ── Quick-chat shortcut: try to resolve via UI string key ──────────
+        val uiKey = findUiStringKey(message.text, sourceLanguage)
+
         for (lang in targetLanguages) {
-            markPendingTranslation(message.id, lang)
-            translationManager?.enqueue(
-                TranslationTask.MessageTranslationTask(
-                    messageId = message.id,
-                    oldLanguage = sourceLanguage,
-                    language = lang,
-                    sequenceNumber = message.timestamp,
+            val translationKey = "${message.id}:$lang"
+
+            if (uiKey != null) {
+                // Attempt to resolve the translation without an LLM call.
+                val resolvedText: String? = when {
+                    // Built-in language (en/ko/ja) — always available immediately.
+                    lang in TranslationManager.BUILTIN_UI_STRINGS ->
+                        TranslationManager.BUILTIN_UI_STRINGS[lang]!![uiKey]
+
+                    // LLM-translated cache already has this key for the target language.
+                    uiTranslations[lang]?.containsKey(uiKey) == true ->
+                        uiTranslations[lang]!![uiKey]
+
+                    else -> null
+                }
+
+                if (resolvedText != null) {
+                    // Perfect: deliver translation instantly, no LLM needed.
+                    Log.d(TAG, "Quick-chat shortcut hit for msg=${message.id} lang=$lang key=$uiKey")
+                    val translation = MessageTranslation(
+                        messageId = message.id,
+                        language = lang,
+                        text = resolvedText,
+                        isPending = false,
+                    )
+                    translations[translationKey] = translation
+                    broadcast("translation", translation)
+                    continue
+                }
+
+                // Translation not cached yet. Check if the relevant UI chunk is
+                // already being translated so we know it's in-flight.
+                val uiChunkEnqueued = translationManager?.isUiKeyEnqueued(lang, uiKey) == true
+
+                // In all remaining cases we need a MessageTranslationTask so the user
+                // eventually receives their translation.  Translate from English
+                // (higher-resource language) for the best output quality.
+                markPendingTranslation(message.id, lang)
+
+                if (uiChunkEnqueued) {
+                    // The UI chunk covering this key is already in the queue.
+                    // The message translation will be produced by the LLM from English
+                    // so we get a high-quality result, but we log the optimisation
+                    // opportunity for future reference.
+                    Log.d(TAG, "UI chunk enqueued for $lang/$uiKey — translating msg ${message.id} from English")
+                }
+
+                translationManager?.enqueue(
+                    TranslationTask.MessageTranslationTask(
+                        messageId = message.id,
+                        oldLanguage = "en",        // always translate from English for recognised UI strings
+                        language = lang,
+                        sequenceNumber = message.timestamp,
+                    )
                 )
-            )
+            } else {
+                // Not a recognised UI string — standard path.
+                markPendingTranslation(message.id, lang)
+                translationManager?.enqueue(
+                    TranslationTask.MessageTranslationTask(
+                        messageId = message.id,
+                        oldLanguage = sourceLanguage,
+                        language = lang,
+                        sequenceNumber = message.timestamp,
+                    )
+                )
+            }
         }
     }
 
@@ -614,7 +734,7 @@ window.__HTTPS_PORT__ = $CHAT_SERVER_PORT_HTTPS;
                     
                     // Skip sending pre-translated languages (en, ja, ko) completely.
                     // Otherwise, only send the specific translations for the user's language.
-                    if (userLanguage !in listOf("en", "ja", "ko")) {
+                    if (userLanguage !in TranslationManager.BUILTIN_UI_STRINGS.keys) {
                         uiTranslations[userLanguage]?.let { langTranslations ->
                             put("uiTranslations", mapOf(
                                 "language" to userLanguage,
