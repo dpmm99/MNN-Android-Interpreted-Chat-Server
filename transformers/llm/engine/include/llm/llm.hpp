@@ -33,6 +33,7 @@ class Sampler;
 class Prompt;
 class Generation;
 class EagleGeneration;
+class JsonSchemaParser;  // Forward declaration for JSON schema support
 struct TimePerformance;
 
 using ChatMessage = std::pair<std::string, std::string>; // <role, content>
@@ -93,6 +94,24 @@ struct LlmContext {
     std::string generate_str;
     // llm status
     LlmStatus status;
+    // constrained decoding
+    bool json_mode = false;  // Enable JSON-constrained decoding
+    int json_state = 0;      // Current JSON parsing state (0=start, 1=in_object, 2=in_key, etc.)
+    bool json_expect_value = false;  // true when expecting a value (after ":")
+    bool json_in_string = false;     // true when inside a JSON string
+    int json_bracket_depth = 0;      // Nesting depth for { and [
+    bool json_complete = false;      // true when JSON is complete (all brackets closed)
+    
+    // JSON Schema support
+    std::shared_ptr<JsonSchemaParser> json_schema;  // Schema parser (nullptr = basic JSON mode)
+    std::string json_schema_string;  // Original schema JSON string
+    std::vector<std::string> expected_keys;  // Keys expected at current level
+    std::vector<std::string> generated_keys;  // Keys generated so far at current level
+    
+    // Degenerate loop detection
+    int recent_tokens[15] = {0};  // Circular buffer of last 15 tokens
+    int recent_token_count = 0;   // Number of tokens seen (for circular buffer indexing)
+    bool loop_detected = false;   // true when degenerate loop is detected
 };
 struct GenerationParams;
 class MNN_PUBLIC Llm {
@@ -136,6 +155,13 @@ public:
     std::string dump_config();
     bool set_config(const std::string& content);
     Llm* create_lora(const std::string& lora_path);
+    // constrained decoding
+    void set_json_mode(bool enabled);
+    bool is_json_mode() const;
+    void reset_json_state();
+    void set_json_schema(const std::string& schema_json);  // Set JSON schema for constrained decoding
+    bool has_json_schema() const;  // Check if schema is loaded
+    void clear_json_schema();  // Clear schema and revert to basic JSON mode
     // tokenier function
     bool is_stop(int token);
     std::string tokenizer_decode(int token);

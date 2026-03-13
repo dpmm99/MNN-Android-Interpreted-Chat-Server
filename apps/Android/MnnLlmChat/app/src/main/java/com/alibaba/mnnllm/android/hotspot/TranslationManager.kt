@@ -294,6 +294,18 @@ class TranslationManager(
 
         val languageName = languageNameFor(task.language)
         val uiStrings = task.chunk.entries.joinToString("\n") { (k, v) -> "$k: $v" }
+        
+        // Build JSON schema based on chunk keys
+        val schemaKeys = task.chunk.keys.joinToString(", ") { "\"$it\"" }
+        val jsonSchema = """{
+            "type": "object",
+            "properties": {
+                ${task.chunk.keys.joinToString(",\n                ") { "\"$it\": {\"type\": \"string\", \"minLength\": 1}" }}
+            },
+            "required": [$schemaKeys],
+            "additionalProperties": false
+        }""".trimIndent()
+        
         val prompt = if (task.isRepair) {
             """The following JSON is malformed. Fix it and output ONLY valid JSON.
 It should be a single flat object with as many lower_snake_case keys as there are labels/messages.
@@ -301,8 +313,7 @@ Do not add any explanations or formatting.
 Input:
 ${task.rawBadJson}"""
         } else {
-            val uiStrings = task.chunk.entries.joinToString("\n") { (k, v) -> "$k: $v" }
-            """Translate each UI string to $languageName for a chat application. 
+            """Translate each UI string to $languageName for a chat application.
 Output ONLY a JSON object with the same keys and translated values. No other text.
 Input:
 $uiStrings"""
@@ -318,6 +329,11 @@ $uiStrings"""
 
         // Start a new debug cycle -> overwrite prior debug state
         _debugFlow.value = InferenceDebugState(prompt = prompt, partialOutput = "", idle = false)
+
+        // Enable JSON-constrained decoding with schema for UI translations
+        session.setJsonMode(true)
+        session.setJsonSchema(jsonSchema)
+        Log.d(TAG, "UI translation schema: $jsonSchema")
 
         // Apply a nonzero temperature for retry attempts that aren't JSON-repair tasks.
         if (task.temperature > 0f) {
@@ -390,6 +406,9 @@ $uiStrings"""
             if (task.temperature > 0f) {
                 llmSession.updateConfig("""{"temperature": 0.0}""")
             }
+            // Disable JSON-constrained decoding and clear schema after generation
+            session.clearJsonSchema()
+            session.setJsonMode(false)
         }
 
         // Completed: mark idle but keep the completed partial output visible

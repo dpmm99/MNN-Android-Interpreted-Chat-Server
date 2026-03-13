@@ -19,6 +19,7 @@
 
 #include "llmconfig.hpp"
 #include "llm/llm.hpp"
+#include "json_schema.hpp"
 
 
 namespace MNN {
@@ -57,12 +58,23 @@ public:
         void configMixed(std::shared_ptr<LlmConfig> llmConfig);
     };
 public:
-    static Sampler* createSampler(std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config);
-    Sampler(std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config);
+    static Sampler* createSampler(std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config, Tokenizer* tokenizer = nullptr);
+    Sampler(std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config, Tokenizer* tokenizer = nullptr);
     int sample(MNN::Express::VARP logits);
 private:
     std::shared_ptr<LlmContext> mContext;
     SamplerConfig mConfig;
+    Tokenizer* mTokenizer;  // Tokenizer for token-level constraints
+    
+    // JSON constraint state
+    std::unordered_map<char, std::vector<int>> mCharToTokens;  // Map characters to token IDs
+    std::vector<int> mNumberStartTokens;  // Tokens that start with digits
+    bool mJsonVocabInitialized = false;
+    
+    // Initialize vocabulary for JSON constraint
+    void initializeJsonVocab();
+    std::vector<int> getValidJsonTokens();
+    
     struct SubsetLogits penalty(struct SubsetLogits superset);
     struct SubsetLogits topK(struct SubsetLogits superset);
     struct SubsetLogits topP(struct SubsetLogits superset);
@@ -72,6 +84,25 @@ private:
     struct SubsetLogits mixed(struct SubsetLogits subset);
     struct SubsetLogits subsetSampler(std::string sampler_type, struct SubsetLogits subset);
     int handleSelect(struct SubsetLogits subset);
+    
+    // JSON-constrained decoding helpers
+    void applyJsonConstraint(Express::VARP logits);
+    void updateJsonState(int token_id);
+    bool isValidJsonToken(int token_id, bool expect_value, bool in_string, bool is_start);
+    int tokenizeChar(char c);  // Get token ID for a single character
+    
+    // JSON Schema-constrained decoding
+    void applySchemaConstraint(Express::VARP logits);
+    std::vector<int> getSchemaValidTokens();
+    void updateSchemaState(int token_id);
+    bool isInSchemaString() const;
+    std::string getCurrentKey() const;
+    SchemaType getExpectedTypeForCurrentKey() const;
+    
+    // Degenerate loop detection
+    void updateRecentTokens(int token_id);
+    bool detectDegenerateLoop();
+    void forceQuoteToken(Express::VARP logits, int& selected_token);
 };
 
 

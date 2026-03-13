@@ -269,6 +269,29 @@ class LlmSession (
         updateConfigNative(nativePtr, configJson)
     }
 
+    fun setJsonMode(enabled: Boolean) {
+        Log.d(TAG, "setJsonMode: $enabled")
+        setJsonModeNative(nativePtr, enabled)
+    }
+
+    fun isJsonMode(): Boolean {
+        return isJsonModeNative(nativePtr)
+    }
+
+    fun setJsonSchema(schemaJson: String) {
+        Log.d(TAG, "setJsonSchema: ${schemaJson.take(100)}...")
+        setJsonSchemaNative(nativePtr, schemaJson)
+    }
+
+    fun hasJsonSchema(): Boolean {
+        return hasJsonSchemaNative(nativePtr)
+    }
+
+    fun clearJsonSchema() {
+        Log.d(TAG, "clearJsonSchema")
+        clearJsonSchemaNative(nativePtr)
+    }
+
     private external fun updateEnableAudioOutputNative(llmPtr: Long, enable: Boolean)
 
 
@@ -279,6 +302,16 @@ class LlmSession (
     private external fun updateAssistantPromptNative(llmPtr: Long, assistantPrompt: String)
 
     private external fun updateConfigNative(llmPtr: Long, configJson: String)
+
+    private external fun setJsonModeNative(llmPtr: Long, enabled: Boolean)
+
+    private external fun isJsonModeNative(llmPtr: Long): Boolean
+
+    private external fun setJsonSchemaNative(llmPtr: Long, schemaJson: String)
+
+    private external fun hasJsonSchemaNative(llmPtr: Long): Boolean
+
+    private external fun clearJsonSchemaNative(llmPtr: Long)
 
 
     companion object {

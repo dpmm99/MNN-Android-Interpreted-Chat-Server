@@ -25,6 +25,7 @@
 #include "omni.hpp"
 #include "speculative_decoding/generate.hpp"
 #include "core/MNNFileUtils.h"
+#include "json_schema.hpp"
 
 // 0: no debug, 1: test op time, 2: print tensor info, 3: print tensor in output
 #define DEBUG_MODE 0
@@ -263,7 +264,7 @@ bool Llm::load() {
     }
     mDiskEmbedding.reset(new DiskEmbedding(mConfig));
     mPrompt.reset(Prompt::createPrompt(mContext, mConfig));
-    mSampler.reset(Sampler::createSampler(mContext, mConfig));
+    mSampler.reset(Sampler::createSampler(mContext, mConfig, mTokenizer.get()));
     // 3. load model
     Module::Config module_config;
     if (mConfig->backend_type() == "opencl" || mConfig->backend_type() == "vulkan" || mConfig->backend_type() == "npu") {
@@ -709,6 +710,11 @@ void Llm::generate_init(std::ostream* os, const char* end_with) {
         mMeta->remove = mMeta->previous;
     }
     mContext->output_tokens.clear();
+    
+    // Reset JSON state for constrained decoding
+    if (mContext->json_mode) {
+        reset_json_state();
+    }
 }
 
 size_t Llm::getCurrentHistory() const {
@@ -1190,7 +1196,82 @@ bool Llm::is_stop(int token_id) {
     if (stop) {
         mContext->status = LlmStatus::NORMAL_FINISHED;
     }
+    
+    // Check for JSON completion (sampler sets json_complete flag)
+    if (mContext->json_mode && mContext->json_complete) {
+        MNN_PRINT("JSON complete - stopping generation\n");
+        mContext->status = LlmStatus::NORMAL_FINISHED;
+        return true;
+    }
+    
     return stop;
 }
+
+void Llm::set_json_mode(bool enabled) {
+    mContext->json_mode = enabled;
+    if (enabled) {
+        reset_json_state();
+    }
+}
+
+bool Llm::is_json_mode() const {
+    return mContext->json_mode;
+}
+
+void Llm::reset_json_state() {
+    mContext->json_state = 0;
+    mContext->json_expect_value = false;
+    mContext->json_in_string = false;
+    mContext->json_bracket_depth = 0;
+    mContext->json_complete = false;
+    
+    // Reset loop detection
+    for (int i = 0; i < 15; i++) {
+        mContext->recent_tokens[i] = 0;
+    }
+    mContext->recent_token_count = 0;
+    mContext->loop_detected = false;
+    
+    // Clear schema tracking
+    mContext->expected_keys.clear();
+    mContext->generated_keys.clear();
+}
+
+void Llm::set_json_schema(const std::string& schema_json) {
+    if (!mContext->json_schema) {
+        mContext->json_schema = std::make_shared<JsonSchemaParser>();
+    }
+    
+    if (mContext->json_schema->initialize(schema_json)) {
+        mContext->json_schema_string = schema_json;
+        mContext->json_mode = true;  // Enable JSON mode automatically
+        
+        // Extract expected keys from root schema
+        if (mContext->json_schema->root()) {
+            mContext->expected_keys.clear();
+            for (const auto& prop : mContext->json_schema->root()->properties()) {
+                mContext->expected_keys.push_back(prop.name);
+            }
+        }
+        
+        MNN_PRINT("JSON schema loaded with %zu properties\n", mContext->expected_keys.size());
+    } else {
+        MNN_PRINT("Failed to parse JSON schema\n");
+        mContext->json_schema = nullptr;
+    }
+}
+
+bool Llm::has_json_schema() const {
+    return mContext->json_schema != nullptr && mContext->json_schema->is_loaded();
+}
+
+void Llm::clear_json_schema() {
+    mContext->json_schema = nullptr;
+    mContext->json_schema_string.clear();
+    mContext->expected_keys.clear();
+    mContext->generated_keys.clear();
+    // Keep json_mode enabled for basic JSON constraint
+}
+
 } // namespace Transformer
 } // namespace MNN

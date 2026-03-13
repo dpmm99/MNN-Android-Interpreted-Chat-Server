@@ -390,6 +390,41 @@ std::string LlmSession::getSystemPrompt() const {
     return system_prompt_;
 }
 
+void LlmSession::setJsonMode(bool enabled) {
+    if (llm_) {
+        llm_->set_json_mode(enabled);
+        MNN_DEBUG("JSON mode %s", enabled ? "enabled" : "disabled");
+    }
+}
+
+bool LlmSession::isJsonMode() const {
+    if (llm_) {
+        return llm_->is_json_mode();
+    }
+    return false;
+}
+
+void LlmSession::setJsonSchema(const std::string& schema_json) {
+    if (llm_) {
+        llm_->set_json_schema(schema_json);
+        MNN_DEBUG("JSON schema set");
+    }
+}
+
+bool LlmSession::hasJsonSchema() const {
+    if (llm_) {
+        return llm_->has_json_schema();
+    }
+    return false;
+}
+
+void LlmSession::clearJsonSchema() {
+    if (llm_) {
+        llm_->clear_json_schema();
+        MNN_DEBUG("JSON schema cleared");
+    }
+}
+
 // Pure C++ benchmark implementation following llm_bench.cpp exactly
 LlmSession::BenchmarkResult LlmSession::runBenchmark(int backend, int threads, bool useMmap, int power, 
                                                     int precision, int memory, int dynamicOption, int nPrompt, 

@@ -53,6 +53,13 @@ public:
 
     void clearHistory(int numToKeep = 1);
 
+    // JSON-constrained decoding
+    void setJsonMode(bool enabled);
+    bool isJsonMode() const;
+    void setJsonSchema(const std::string& schema_json);  // Set JSON schema for constrained decoding
+    bool hasJsonSchema() const;
+    void clearJsonSchema();  // Clear schema but keep JSON mode enabled
+
     // Add getter method for underlying Llm object for benchmarking purposes
     Llm* getLlm() const { return llm_; }
     

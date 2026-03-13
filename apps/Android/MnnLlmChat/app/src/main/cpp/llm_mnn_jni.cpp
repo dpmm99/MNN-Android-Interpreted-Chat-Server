@@ -667,4 +667,65 @@ Java_com_alibaba_mnnllm_android_llm_LlmSession_runBenchmarkNative(
     return env->NewObject(resultClass, resultCtor, testInstance, (jboolean)result.success, errorMessage);
 }
 
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_alibaba_mnnllm_android_llm_LlmSession_setJsonModeNative(JNIEnv *env, jobject thiz,
+                                                                 jlong llm_ptr, jboolean enabled) {
+    auto *llm = reinterpret_cast<mls::LlmSession *>(llm_ptr);
+    if (llm) {
+        auto *llm_inner = llm->getLlm();
+        if (llm_inner) {
+            llm_inner->set_json_mode(enabled == JNI_TRUE);
+            MNN_DEBUG("JSON mode %s", enabled == JNI_TRUE ? "enabled" : "disabled");
+        }
+    }
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_alibaba_mnnllm_android_llm_LlmSession_isJsonModeNative(JNIEnv *env, jobject thiz,
+                                                                jlong llm_ptr) {
+    auto *llm = reinterpret_cast<mls::LlmSession *>(llm_ptr);
+    if (llm) {
+        auto *llm_inner = llm->getLlm();
+        if (llm_inner) {
+            return llm_inner->is_json_mode() ? JNI_TRUE : JNI_FALSE;
+        }
+    }
+    return JNI_FALSE;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_alibaba_mnnllm_android_llm_LlmSession_setJsonSchemaNative(JNIEnv *env, jobject thiz,
+                                                                   jlong llm_ptr, jstring schema_json) {
+    auto *llm = reinterpret_cast<mls::LlmSession *>(llm_ptr);
+    if (llm) {
+        const char* schema_cstr = env->GetStringUTFChars(schema_json, nullptr);
+        llm->setJsonSchema(schema_cstr);
+        env->ReleaseStringUTFChars(schema_json, schema_cstr);
+    }
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_alibaba_mnnllm_android_llm_LlmSession_hasJsonSchemaNative(JNIEnv *env, jobject thiz,
+                                                                   jlong llm_ptr) {
+    auto *llm = reinterpret_cast<mls::LlmSession *>(llm_ptr);
+    if (llm) {
+        return llm->hasJsonSchema() ? JNI_TRUE : JNI_FALSE;
+    }
+    return JNI_FALSE;
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_alibaba_mnnllm_android_llm_LlmSession_clearJsonSchemaNative(JNIEnv *env, jobject thiz,
+                                                                     jlong llm_ptr) {
+    auto *llm = reinterpret_cast<mls::LlmSession *>(llm_ptr);
+    if (llm) {
+        llm->clearJsonSchema();
+    }
+}
+
 } // extern "C"
