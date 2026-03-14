@@ -1,5 +1,6 @@
 package com.alibaba.mnnllm.android.modelist
 
+import android.content.Context
 import android.util.Log
 import android.view.MenuItem
 import android.view.View
@@ -18,6 +19,7 @@ import com.alibaba.mnnllm.android.R
 import com.alibaba.mnnllm.android.model.ModelTypeUtils
 import com.alibaba.mnnllm.android.model.ModelUtils
 import com.alibaba.mnnllm.android.modelsettings.SettingsBottomSheetFragment
+import com.alibaba.mnnllm.android.modelsettings.DiffusionSettingsBottomSheetFragment
 import com.alibaba.mnnllm.android.utils.DialogUtils
 import com.alibaba.mnnllm.android.utils.FileUtils
 import com.alibaba.mnnllm.android.widgets.ModelAvatarView
@@ -142,7 +144,7 @@ class ModelItemHolder(
     }
 
     /**
-     * Extract source information from modelId
+     * Extract source label from modelId for non-local models (ModelScope, HuggingFace, Modelers, Builtin).
      */
     private fun getModelSource(modelId: String?): String? {
         return when {
@@ -150,12 +152,45 @@ class ModelItemHolder(
             modelId.startsWith("HuggingFace/") || modelId.contains("taobao-mnn") -> itemView.context.getString(R.string.huggingface)
             modelId.startsWith("ModelScope/") -> itemView.context.getString(R.string.modelscope)
             modelId.startsWith("Modelers/") -> itemView.context.getString(R.string.modelers)
+            modelId.startsWith("Builtin/") -> itemView.context.getString(R.string.builtin)
             else -> null
         }
     }
 
-    private fun getDisplayTags(modelItem: ModelItem): List<String> {
-        return com.alibaba.mnnllm.android.modelmarket.TagMapper.getDisplayTagList(modelItem.tags).take(3)
+    /**
+     * Fallback: derive source from localPath when modelId has no source prefix (e.g. legacy or wrong id).
+     * Paths under .mnnmodels/modelscope/ -> ModelScope, modelers/ -> Modelers, builtin/ -> Builtin, else root -> HuggingFace.
+     */
+    private fun getModelSourceFromPath(localPath: String?): String? {
+        if (localPath == null) return null
+        return when {
+            localPath.contains("/modelscope/") -> itemView.context.getString(R.string.modelscope)
+            localPath.contains("/modelers/") -> itemView.context.getString(R.string.modelers)
+            localPath.contains("/builtin/") -> itemView.context.getString(R.string.builtin)
+            localPath.contains(".mnnmodels") -> itemView.context.getString(R.string.huggingface)
+            else -> null
+        }
+    }
+
+    private fun getDisplayTags(modelItem: ModelItem, context: Context): List<String> {
+        return com.alibaba.mnnllm.android.modelmarket.TagMapper.getDisplayTagList(modelItem.tags, context).take(3)
+    }
+
+    /**
+     * Tags to show: for models from ModelScope/HuggingFace/Modelers/Builtin prepend source label, then up to 2 content tags (3 total).
+     * Note: ModelItem.isLocal is true whenever localPath is set (including downloaded models). We show source when modelId
+     * or path indicates a store source (ModelScope etc.), not when !isLocal.
+     */
+    private fun getDisplayTagsWithSource(modelWrapper: ModelItemWrapper): List<String> {
+        val modelItem = modelWrapper.modelItem
+        val contentTags = getDisplayTags(modelItem, itemView.context).toMutableList()
+        val sourceLabel = modelWrapper.sourceTag
+            ?: getModelSource(modelItem.modelId)
+            ?: getModelSourceFromPath(modelItem.localPath)
+        if (sourceLabel != null) {
+            return listOf(sourceLabel) + contentTags.take(2)
+        }
+        return contentTags.take(3)
     }
 
     fun bind(modelWrapper: ModelItemWrapper) {
@@ -170,8 +205,8 @@ class ModelItemHolder(
         tvModelTitle.text = modelName
         headerSection.setModelName(modelName)
         
-        // Use consistent tag display logic
-        tagsLayout.setTags(getDisplayTags(modelItem))
+        // Use consistent tag display logic; for non-local models prepend data-source tag (ModelScope, HuggingFace, etc.)
+        tagsLayout.setTags(getDisplayTagsWithSource(modelWrapper))
         
         // Display time information from wrapper
         displayTimeInfo(modelWrapper)
@@ -197,12 +232,28 @@ class ModelItemHolder(
         if (modelWrapper.hasUpdate) {
             btnUpdate.visibility = View.VISIBLE
             if (isUpdating) {
-                btnUpdate.text = btnUpdate.resources.getString(R.string.download_state_updating)
+                val downloadInfo = modelWrapper.modelItem.modelId?.let { modelDownloadManager.getDownloadInfo(it) }
+                val isPreparing = downloadInfo?.downloadState == DownloadState.PREPARING
+                
+                val statusText = if (isPreparing) {
+                     btnUpdate.resources.getString(R.string.download_pending)
+                } else {
+                     btnUpdate.resources.getString(R.string.download_state_updating)
+                }
+                
+                btnUpdate.text = statusText
                 btnUpdate.isEnabled = false
-                tvStatus.text = if (formattedSize.isNotEmpty()) {
-                    "${formattedSize} (${tvStatus.resources.getString(R.string.download_state_updating)})"
+                
+                val statusMsg = if (isPreparing) {
+                    tvStatus.resources.getString(R.string.download_preparing)
                 } else {
                     tvStatus.resources.getString(R.string.download_state_updating)
+                }
+                
+                tvStatus.text = if (formattedSize.isNotEmpty()) {
+                    "$formattedSize ($statusMsg)"
+                } else {
+                    statusMsg
                 }
             } else {
                 btnUpdate.text = btnUpdate.resources.getString(R.string.update)
@@ -233,7 +284,7 @@ class ModelItemHolder(
         
         modelWrapper.modelItem.modelId?.let { modelId ->
             val downloadInfo = modelDownloadManager.getDownloadInfo(modelId)
-            return downloadInfo.downloadState == DownloadState.DOWNLOADING
+            return downloadInfo.downloadState == DownloadState.DOWNLOADING || downloadInfo.downloadState == DownloadState.PREPARING
         }
         return false
     }
@@ -277,28 +328,34 @@ class ModelItemHolder(
                 DialogUtils.showDeleteConfirmationDialog(v.context) {
                     MainScope().launch {
                         try {
-                            ModelDownloadManager.getInstance(v.context).deleteModel(modelId!!)
+                            // Use ModelDeletionHelper for proper cleanup of mmap cache and chat sessions
+                            val result = ModelDeletionHelper.deleteModelWithCleanup(v.context, modelId!!)
+                            if (!result.modelDeleted) {
+                                Log.w(TAG, "Model deletion incomplete: ${result.errors.joinToString()}")
+                            }
                             // Notify the listener that the model was deleted successfully
                             modelItemListener.onItemDeleted(modelItem)
                         } catch (e: Exception) {
                             Log.e(TAG, "Failed to delete model: $modelId", e)
-                            // You could show an error toast here if needed
                         }
                     }
                 }
             } else if (item.itemId == R.id.menu_settings) {
                 val context = v.context
                 val modelId = modelItem.modelId
-                if (ModelTypeUtils.isDiffusionModel(modelId!!)) {
-                    Toast.makeText(context, R.string.diffusion_model_not_alloed, Toast.LENGTH_SHORT).show()
-                    return@setOnMenuItemClickListener true
-                }
                 val fragmentManager = (context as? AppCompatActivity)?.supportFragmentManager
                 if (fragmentManager != null) {
-                    val settingsSheet = SettingsBottomSheetFragment()
-                    settingsSheet.setModelId(modelId)
-                    settingsSheet.setConfigPath(modelItem.localPath)
-                    settingsSheet.show(fragmentManager, SettingsBottomSheetFragment.TAG)
+                    if (ModelTypeUtils.isDiffusionModel(modelId!!)) {
+                        val settingsSheet = DiffusionSettingsBottomSheetFragment()
+                        settingsSheet.setModelId(modelId)
+                        settingsSheet.setConfigPath(modelItem.localPath)
+                        settingsSheet.show(fragmentManager, DiffusionSettingsBottomSheetFragment.TAG)
+                    } else {
+                        val settingsSheet = SettingsBottomSheetFragment()
+                        settingsSheet.setModelId(modelId)
+                        settingsSheet.setConfigPath(modelItem.localPath)
+                        settingsSheet.show(fragmentManager, SettingsBottomSheetFragment.TAG)
+                    }
                 }
             } else if (item.itemId == R.id.menu_show_model_info) {
                 // Show model info directly

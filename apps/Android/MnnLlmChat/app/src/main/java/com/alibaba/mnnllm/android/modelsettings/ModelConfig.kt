@@ -47,7 +47,14 @@ data class ModelConfig(
     @SerializedName("assistant_prompt_template")var assistantPromptTemplate:String?,
     @SerializedName("penalty_sampler")var penaltySampler:String?,
     @SerializedName("jinja") var jinja: Jinja?,
-    @SerializedName("visual_model") var visualModel: String?
+    @SerializedName("visual_model") var visualModel: String?,
+    @SerializedName("diffusion_memory_mode") var diffusionMemoryMode: String?,
+    @SerializedName("diffusion_steps") var diffusionSteps: Int?,
+    @SerializedName("image_width") var imageWidth: Int?,
+    @SerializedName("image_height") var imageHeight: Int?,
+    @SerializedName("diffusion_seed") var diffusionSeed: Long?,
+    @SerializedName("cfg_prompt") var cfgPrompt: String?,
+    @SerializedName("grid_size") var gridSize: Int?
     ) {
     fun deepCopy(): ModelConfig {
         return ModelConfig(
@@ -76,7 +83,14 @@ data class ModelConfig(
             jinja = this.jinja?.let {
                 Jinja(context = JinjaContext(enableThinking = it.context?.enableThinking == true))
             },
-            visualModel = this.visualModel
+            visualModel = this.visualModel,
+            diffusionMemoryMode = this.diffusionMemoryMode,
+            diffusionSteps = this.diffusionSteps,
+            imageWidth = this.imageWidth,
+            imageHeight = this.imageHeight,
+            diffusionSeed = this.diffusionSeed,
+            cfgPrompt = this.cfgPrompt,
+            gridSize = this.gridSize
         )
     }
 
@@ -93,7 +107,14 @@ data class ModelConfig(
                 this.nGram == loadedConfig.nGram &&
                 this.nGramFactor == loadedConfig.nGramFactor &&
                 this.penaltySampler == loadedConfig.penaltySampler &&
-                this.visualModel == loadedConfig.visualModel
+                this.visualModel == loadedConfig.visualModel &&
+                this.diffusionMemoryMode == loadedConfig.diffusionMemoryMode &&
+                this.diffusionSteps == loadedConfig.diffusionSteps &&
+                this.imageWidth == loadedConfig.imageWidth &&
+                this.imageHeight == loadedConfig.imageHeight &&
+                this.diffusionSeed == loadedConfig.diffusionSeed &&
+                this.cfgPrompt == loadedConfig.cfgPrompt &&
+                this.gridSize == loadedConfig.gridSize
     }
 
     companion object {
@@ -112,7 +133,12 @@ data class ModelConfig(
         }
 
         fun loadConfig(modelId: String): ModelConfig? {
-            return loadMergedConfig(getDefaultConfigFile(modelId)!!, getExtraConfigFile(modelId))
+            val defaultConfigFile = getDefaultConfigFile(modelId)
+            if (defaultConfigFile.isNullOrEmpty()) {
+                Log.w(TAG, "loadConfig: default config not found for modelId=$modelId")
+                return null
+            }
+            return loadMergedConfig(defaultConfigFile, getExtraConfigFile(modelId))
         }
 
         fun loadMergedConfig(originalFilePath: String, overrideFilePath: String): ModelConfig? {
@@ -164,9 +190,22 @@ data class ModelConfig(
             return null
         }
 
+        /** Keys that must not be overwritten by empty string - model paths and backend from config.json */
+        private val PROTECTED_KEYS = setOf("llm_model", "llm_weight", "backend_type")
+
         private fun mergeJson(original: JsonObject, override: JsonObject) {
             for (key in override.keySet()) {
-                original.add(key, override.get(key))
+                val overrideVal = override.get(key)
+                // Don't let empty string overwrite model paths - custom_config may have saved
+                // defaultConfig's empty llm_model/llm_weight, which would break model load
+                if (key in PROTECTED_KEYS && overrideVal.isJsonPrimitive &&
+                    overrideVal.asJsonPrimitive.isString && overrideVal.asString.isBlank() &&
+                    original.has(key) && original.get(key).isJsonPrimitive &&
+                    original.get(key).asJsonPrimitive.isString && original.get(key).asString.isNotBlank()
+                ) {
+                    continue
+                }
+                original.add(key, overrideVal)
             }
         }
 
@@ -224,7 +263,7 @@ data class ModelConfig(
         val defaultConfig:ModelConfig = ModelConfig (
             llmModel = "",
             llmWeight = "",
-            backendType = "",
+            backendType = null,
             threadNum = 4,
             precision = "low",
             memory = "",
@@ -245,9 +284,15 @@ data class ModelConfig(
             penaltySampler = "greedy",
             useMmap = false,
             jinja = null,
-            visualModel = "visual.mnn"
+            visualModel = "visual.mnn",
+            diffusionMemoryMode = "0",
+            diffusionSteps = 20,
+            imageWidth = 512,
+            imageHeight = 512,
+            diffusionSeed = 42L,
+            cfgPrompt = "Generate high quality image",
+            gridSize = 1
         )
 
     }
 }
-

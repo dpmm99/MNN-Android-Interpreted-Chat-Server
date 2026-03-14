@@ -22,6 +22,7 @@
 #include <MNN/expr/Module.hpp>
 #include <MNN/expr/MathOp.hpp>
 #include <MNN/expr/NeuralNetWorkOp.hpp>
+#include <MNN/expr/ExecutorScope.hpp>
 
 namespace MNN {
 namespace Transformer {
@@ -217,6 +218,7 @@ protected:
     std::vector<Express::VARP> mAttentionMaskVarVec, mPositionIdsVarVec;
     Express::VARP logitsAllIdx, logitsLastIdx;
     int mSeqLenIndex = 0;
+    std::shared_ptr<MNN::Express::Executor> mExecutor;
 protected:
     friend class ArGeneration;
     friend class LookaheadGeneration;

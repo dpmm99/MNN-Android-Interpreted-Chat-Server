@@ -35,6 +35,10 @@
 
 
 # 开发 
++ 准备环境：
+  + Android Studio
+  + NDK（与 `app/build.gradle` 保持一致，当前为 `27.2.12479018`）
+  + `export ANDROID_NDK=${YOUR_NDK_ROOT}`
 + 克隆代码库：
   ```shell
     git clone https://github.com/alibaba/MNN.git
@@ -43,6 +47,7 @@
   ```shell
   cd project/android
   mkdir build_64
+  cd build_64
   ../build_64.sh "-DMNN_LOW_MEMORY=true -DMNN_CPU_WEIGHT_DEQUANT_GEMM=true -DMNN_BUILD_LLM=true -DMNN_SUPPORT_TRANSFORMER_FUSE=true -DMNN_ARM82=true -DMNN_USE_LOGCAT=true -DMNN_OPENCL=true -DLLM_SUPPORT_VISION=true -DMNN_BUILD_OPENCV=true -DMNN_IMGCODECS=true -DLLM_SUPPORT_AUDIO=true -DMNN_BUILD_AUDIO=true -DMNN_BUILD_DIFFUSION=ON -DMNN_SEP_BUILD=OFF -DCMAKE_INSTALL_PREFIX=."
   make install
   ```
@@ -51,8 +56,58 @@
   cd ../../../apps/Android/MnnLlmChat
   ./installDebug.sh
   ```
-
 # Releases
+
+## Version 0.8.1.3
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/apks/mnn_chat_0_8_1_3.apk)
++ 问题修复：
+  + 提升 Google Play 发版的整体稳定性。
+
+## Version 0.8.1.2
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/apks/mnn_chat_0_8_1_2.apk)
++ 问题修复：
+  + 修复已知问题并提升整体稳定性。
+
+## Version 0.8.1.1
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_8_1_1.apk)
++ 问题修复：
+  + 修复若干已知问题并提升整体稳定性。
+  + 提升模型切换与聊天流程的可靠性。
+
+## Version 0.8.1
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_8_1.apk)
++ 更新亮点：
+  + 支持 Qwen3.5 切换思考模式。
+  + 提高 API 稳定性，兼容 Anthropic 协议。
+
+## Version 0.8.0.1
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_8_0_1.apk)
++ 问题修复：
+  + 修复 Qwen3.5 的 benchmark 崩溃问题
+
+## Version 0.8.0
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_8_0.apk)
++ 新功能：
+  + 支持 Qwen3.5
+
+## Version 0.7.8
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_8.apk)
++ 新增：
+  + 稳定性改进
+
+## Version 0.7.7
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_7.apk)
++ 问题修复：
+  + 修复下载删除失败问题
++ 新功能：
+  + 支持 Sana 图像编辑模型
+
+## Version 0.7.6
++ 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_6.apk)
++ 问题修复：
+  + 修复 huggingface 下载错误
++ 界面更新：
+  + 支持多图输入
 
 ## Version 0.7.5
 + 点击这里 [下载](https://meta.alicdn.com/data/mnn/mnn_chat_0_7_5.apk)

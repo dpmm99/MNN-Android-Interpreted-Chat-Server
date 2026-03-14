@@ -50,14 +50,15 @@ class VoiceChatPresenter(
     private val activity: Activity,
     private val view: VoiceChatView,
     private val chatPresenter: ChatPresenter,
-    private val lifecycleScope: CoroutineScope
+    private val lifecycleScope: CoroutineScope,
+    private val ttsClientFactory: () -> TtsClient = { RealTtsClient(TtsService()) }
 ) : ChatPresenter.GenerateListener {
     companion object {
         const val TAG = "VoiceChatPresenter"
     }
 
     private var asrService: AsrService? = null
-    private var ttsService: TtsService? = null
+    private var ttsService: TtsClient? = null
     private var audioPlayer: AudioChunksPlayer? = null
     private var audioManager: AudioManager = activity.getSystemService(Activity.AUDIO_SERVICE) as AudioManager
 
@@ -67,6 +68,8 @@ class VoiceChatPresenter(
     private var isStopped = false
     private var isStoppingGeneration = false
     private var isGenerationFinished = false
+    private var isMuted = false
+    private var isAutoMuteForEchoCancelMode = false
     
     // For handling LLM generation progress with thinking support
     private var generateResultProcessor: GenerateResultProcessor? = null
@@ -144,7 +147,7 @@ class VoiceChatPresenter(
                         if (!isStopped && !isStoppingGeneration) {
                             currentStatus = VoiceChatPresenterState.PLAYING
                             withContext(Dispatchers.Main) { view.updateStatus(VoiceChatState.SPEAKING) }
-                            val audioData = ttsService?.process(textToSpeak, 0)
+                            val audioData = processTtsText(textToSpeak)
                             if (audioData != null && audioData.isNotEmpty() && !isStopped && !isStoppingGeneration) {
                                 audioPlayer?.playChunk(audioData)
                             }
@@ -170,7 +173,7 @@ class VoiceChatPresenter(
                     Log.d(TAG, "Speaking remaining buffer: '$textToSpeak'")
                     currentStatus = VoiceChatPresenterState.PLAYING
                     withContext(Dispatchers.Main) { view.updateStatus(VoiceChatState.SPEAKING) }
-                    val audioData = withContext(Dispatchers.IO) { ttsService?.process(textToSpeak, 0) }
+                    val audioData = processTtsText(textToSpeak)
                     if (audioData != null && audioData.isNotEmpty() && !isStopped && !isStoppingGeneration) {
                         audioPlayer?.playChunk(audioData)
                     }
@@ -221,13 +224,16 @@ class VoiceChatPresenter(
         
         // Register this presenter as an additional listener to ChatPresenter
         chatPresenter.addGenerateListener(this)
+
+        view.updateMuteButtonState(isMuted)
+        view.updateEchoCancelMode(isAutoMuteForEchoCancelMode)
         
         initTts()
         startAsr()
     }
 
 
-    private fun initAudio() {
+    private fun initAudio(sampleRate: Int) {
         // Clean up existing audio player first
         audioPlayer?.destroy()
         
@@ -243,9 +249,9 @@ class VoiceChatPresenter(
             }
         }
         
-        audioPlayer?.sampleRate = 44100
+        audioPlayer?.sampleRate = sampleRate
         audioPlayer?.start()
-        Log.d(TAG, "Audio player initialized with completion listener")
+        Log.d(TAG, "Audio player initialized with completion listener, sampleRate=$sampleRate")
     }
 
     private fun initTts() {
@@ -254,13 +260,17 @@ class VoiceChatPresenter(
                 if (isStopped) return@launch
                 
                 Log.d(TAG, "Initializing TTS Service...")
-                ttsService = TtsService()
-                initAudio()
+                ttsService = ttsClientFactory()
+                val modelDir = VoiceModelPathUtils.getTtsModelPath(activity)
+                val sampleRate = VoiceModelPathUtils.getTtsSampleRate(modelDir)
+                val language = VoiceModelPathUtils.getTtsLanguage(activity)
+                ttsService?.setLanguage(language)
+                initAudio(sampleRate)
                 withContext(Dispatchers.IO) {
                     if (isStopped) return@withContext
                     
-                    val modelDir = VoiceModelPathUtils.getTtsModelPath(activity)
                     Log.i(TAG, "Using TTS model path: $modelDir")
+                    Log.i(TAG, "Using TTS language: $language")
                     val initResult = ttsService?.init(modelDir)
                     if (initResult != true) {
                         Log.e(TAG, "TTS Service initialization failed with path: $modelDir")
@@ -381,7 +391,7 @@ class VoiceChatPresenter(
                     if (isStopped) return@withContext
                     
                     Log.d(TAG, "Speaking greeting message: $greetingMessage")
-                    val audioData = ttsService?.process(greetingMessage, 0)
+                    val audioData = processTtsText(greetingMessage)
                     
                     if (audioData != null && audioData.isNotEmpty() && !isStopped) {
                         withContext(Dispatchers.Main) {
@@ -446,6 +456,16 @@ class VoiceChatPresenter(
         }
     }
 
+    private suspend fun processTtsText(text: String): ShortArray? {
+        val service = ttsService ?: return null
+        val isReady = service.waitForInitComplete()
+        if (!isReady) {
+            Log.w(TAG, "TTS Service not ready, skipping synthesis for text: $text")
+            return null
+        }
+        return service.process(text, 0)
+    }
+
     fun stop() {
         Log.d(TAG, "Presenter stopping...")
         isStopped = true
@@ -496,6 +516,19 @@ class VoiceChatPresenter(
     fun toggleSpeaker(isSpeakerOn: Boolean) {
         audioManager.isSpeakerphoneOn = isSpeakerOn
         Log.d(TAG, "Speaker toggled: $isSpeakerOn")
+    }
+
+    fun toggleMute() {
+        isMuted = !isMuted
+        asrService?.setMuted(isMuted)
+        view.updateMuteButtonState(isMuted)
+        Log.d(TAG, "Microphone mute toggled: $isMuted")
+    }
+
+    fun toggleEchoCancelMode() {
+        isAutoMuteForEchoCancelMode = !isAutoMuteForEchoCancelMode
+        view.updateEchoCancelMode(isAutoMuteForEchoCancelMode)
+        Log.d(TAG, "Echo cancel mode toggled, auto mute: $isAutoMuteForEchoCancelMode")
     }
 
     fun stopGeneration() {
@@ -629,4 +662,26 @@ interface VoiceChatView {
     fun showError(message: String)
     fun stopGeneration()
     fun showGreetingMessage()
-} 
+    fun updateMuteButtonState(isMuted: Boolean)
+    fun updateEchoCancelMode(isAutoMuteForEchoCancelMode: Boolean)
+}
+
+interface TtsClient {
+    fun setLanguage(language: String)
+    suspend fun init(modelDir: String): Boolean
+    suspend fun waitForInitComplete(): Boolean
+    fun process(text: String, id: Int): ShortArray
+    fun destroy()
+}
+
+class RealTtsClient(private val service: TtsService) : TtsClient {
+    override fun setLanguage(language: String) = service.setLanguage(language)
+
+    override suspend fun init(modelDir: String): Boolean = service.init(modelDir)
+
+    override suspend fun waitForInitComplete(): Boolean = service.waitForInitComplete()
+
+    override fun process(text: String, id: Int): ShortArray = service.process(text, id)
+
+    override fun destroy() = service.destroy()
+}

@@ -28,25 +28,36 @@ class MNNConverter:
         self.tie_embeddings_info = None
 
     def convert(self, convert_args):
-        sfd = os.dup(1)
+        import contextlib
         log_fp = open(EXPORT_LOG, "a")
-        log_fd = log_fp.fileno()
-        # mnnconvert ... > .export.log
-        os.dup2(log_fd, 1)
+        sfd = None
         try:
-            sys.argv = convert_args
-            sys.argc = len(convert_args)
-            if self.mnnconvert is None:
-                from MNN.tools import mnnconvert
-                mnnconvert.main()
-            else:
-                convert_args[0] = self.mnnconvert
-                cmd = ' '.join(convert_args)
-                message = os.popen(cmd).read()
-                print(message)
-            sys.argv = []
+            sfd = os.dup(1)
+            log_fd = log_fp.fileno()
+            # mnnconvert ... > .export.log
+            os.dup2(log_fd, 1)
+        except Exception:
+            if sfd is not None:
+                os.close(sfd)
+                sfd = None
+
+        try:
+            with contextlib.redirect_stdout(log_fp):
+                sys.argv = convert_args
+                sys.argc = len(convert_args)
+                if self.mnnconvert is None:
+                    from MNN.tools import mnnconvert
+                    mnnconvert.main()
+                else:
+                    convert_args[0] = self.mnnconvert
+                    cmd = ' '.join(convert_args)
+                    message = os.popen(cmd).read()
+                    print(message)
+                sys.argv = []
         finally:
-            os.dup2(sfd, 1)
+            if sfd is not None:
+                os.dup2(sfd, 1)
+                os.close(sfd)
             log_fp.close()
 
     @spinner_run(f'convert onnx model to ')
@@ -183,8 +194,11 @@ class MNNConverter:
                 inputs.append(node['outputIndexes'][0])
         for output_name in expert_graph['outputName']:
             outputs.append(tensors.index(output_name))
+        # Use actual layer indices (for models where not all layers have MoE)
+        expert_layer_ids = getattr(self.exporter, 'expert_layer_ids', list(range(layers_num)))
         subgraphs = []
         for i in range(layers_num):
+            layer_idx = expert_layer_ids[i]
             for j in range(expert_num):
                 ijnodes = copy.deepcopy(nodes)
                 for op in ijnodes:
@@ -192,10 +206,10 @@ class MNNConverter:
                         for attr in op['main']['attr']:
                             if attr['key'] == 'name':
                                 names = attr['s'].split('/')
-                                names[2] = f'{i}_{j}'
+                                names[2] = f'{layer_idx}_{j}'
                                 attr['s'] = '/'.join(names)
                 subgraph = {
-                    'name': f'/expert/{i}_{j}',
+                    'name': f'/expert/{layer_idx}_{j}',
                     'inputs': inputs,
                     'outputs': outputs,
                     'tensors': copy.deepcopy(tensors),

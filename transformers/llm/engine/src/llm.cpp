@@ -13,7 +13,6 @@
 #include <unordered_set>
 
 #include <MNN/AutoTime.hpp>
-#include <MNN/expr/ExecutorScope.hpp>
 #include "cpp/ExprDebug.hpp"
 #include "llm/llm.hpp"
 #include "kvmeta.hpp"
@@ -237,6 +236,7 @@ void Llm::setSpeculativeConfig() {
 }
 
 bool Llm::load() {
+    MNN::Express::ExecutorScope s(mExecutor);
     Timer _t;
     initRuntime();
     // init module status
@@ -343,11 +343,11 @@ bool Llm::load() {
         // attentiion mask var
         {
             // Mask: lower triangular
-            if (mConfig->backend_type() == "cpu") {
-                mAttentionMaskVarVec[i] = _Input({}, NCHW, halide_type_of<float>());
-                auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
-                ptr[0] = 0;
-            } else {
+           if (mConfig->backend_type() == "cpu" && mValidBlockSize.empty()) {
+               mAttentionMaskVarVec[i] = _Input({}, NCHW, halide_type_of<float>());
+               auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
+               ptr[0] = 0;
+           } else {
                 mAttentionMaskVarVec[i] = _Input({1, 1, index, index}, NCHW, halide_type_of<float>());
                 auto ptr = mAttentionMaskVarVec[i]->writeMap<float>();
                 for (int i = 0; i < index; i++) {
@@ -355,13 +355,13 @@ bool Llm::load() {
                         ptr[index * i + j] = (j > i) * std::numeric_limits<float>::lowest();
                     }
                 }
-            }
+           }
         }
 
         if (mConfig->is_mrope()) {
             mPositionIdsVarVec[i] = _Input({3, index}, NCHW, halide_type_of<int>());
         } else {
-            mPositionIdsVarVec[i] = _Input({index}, NCHW, halide_type_of<int>());
+            mPositionIdsVarVec[i] = _Input({1, index}, NCHW, halide_type_of<int>());
         }
     }
 
@@ -385,6 +385,7 @@ Llm* Llm::create_lora(const std::string& lora_path) {
 }
 
 void Llm::tuning(TuneType type, std::vector<int> candidates) {
+    MNN::Express::ExecutorScope s(mExecutor);
     if (type != OP_ENCODER_NUMBER) {
         MNN_ERROR("tuning type not supported\n");
         return;
@@ -451,6 +452,7 @@ void Llm::setKVCacheInfo(size_t add, size_t remove, int* reserve, int n_reserve)
 }
 
 std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::VARP mask, Express::VARP inputPos, Express::VARPS extraArgs) {
+    MNN::Express::ExecutorScope s(mExecutor);
     Express::VARP logitsIndex;
     bool inDecode = mContext->gen_seq_len > 0;
     bool isAllLogists = mConfig->all_logits() ? true : (inDecode ? mInSpec : false);
@@ -554,10 +556,12 @@ std::vector<Express::VARP> Llm::forwardRaw(Express::VARP hiddenState, Express::V
 }
 
 VARP Llm::forward(const std::vector<int>& input_ids, bool is_prefill) {
+    MNN::Express::ExecutorScope s(mExecutor);
     auto hidden_states = embedding(input_ids);
     return forward(hidden_states);
 }
 VARP Llm::forward(MNN::Express::VARP input_embeds) {
+    MNN::Express::ExecutorScope s(mExecutor);
     int seq_len         = input_embeds->getInfo()->dim[mSeqLenIndex];
     auto out = forwardVec(input_embeds);
     if (out.empty()) {
@@ -569,12 +573,14 @@ VARP Llm::forward(MNN::Express::VARP input_embeds) {
 }
 
 std::vector<VARP> Llm::forwardVec(const std::vector<int>& input_ids) {
+    MNN::Express::ExecutorScope s(mExecutor);
     auto input_embeds = embedding(input_ids);
     auto outputs = forwardVec(input_embeds);
     return outputs;
 }
 
 std::vector<VARP> Llm::forwardVec(MNN::Express::VARP input_embeds) {
+    MNN::Express::ExecutorScope s(mExecutor);
     int seq_len         = input_embeds->getInfo()->dim[mSeqLenIndex];
     if (0 == mBlockSize) {
         mMeta->add = seq_len;
@@ -668,6 +674,7 @@ void Llm::updateContext(int seq_len, int gen_len) {
 }
 
 int Llm::sample(VARP logits, int offset, int size) {
+    MNN::Express::ExecutorScope s(mExecutor);
     auto logitsShape = logits->getInfo()->dim;
     if (offset && size) {
         MNN_ASSERT(logits->getInfo()->size >= offset + size);
@@ -753,6 +760,7 @@ bool Llm::stoped() {
 }
 
 void Llm::generate(int max_token) {
+    MNN::Express::ExecutorScope s(mExecutor);
     if (is_stop(mContext->current_token)) {
         return;
     }
@@ -761,6 +769,7 @@ void Llm::generate(int max_token) {
 }
 
 std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens) {
+    MNN::Express::ExecutorScope s(mExecutor);
     if (max_tokens < 0) {
         max_tokens = mConfig->max_new_tokens();
     }
@@ -839,6 +848,7 @@ std::vector<int> Llm::tokenizer_encode(const MultimodalPrompt& multimodal_input)
 
 void Llm::response(const MultimodalPrompt& multimodal_input,
                    std::ostream* os, const char* end_with, int max_new_tokens) {
+    MNN::Express::ExecutorScope s(mExecutor);
     auto multimodal_input_copy = multimodal_input;
     if (mConfig->use_template()) {
         multimodal_input_copy.prompt_template = mPrompt->applyTemplate(multimodal_input_copy.prompt_template, true);
@@ -848,6 +858,7 @@ void Llm::response(const MultimodalPrompt& multimodal_input,
 }
 
 std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) {
+    MNN::Express::ExecutorScope s(mExecutor);
     if (max_tokens < 0) {
         max_tokens = mConfig->max_new_tokens();
     }
@@ -908,18 +919,21 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens) 
 }
 
 void Llm::response(const std::vector<int>& input_ids, std::ostream* os, const char* end_with, int max_new_tokens) {
+    MNN::Express::ExecutorScope s(mExecutor);
     if (!end_with) { end_with = "\n"; }
     generate_init(os, end_with);
     generate(input_ids, max_new_tokens);
 }
 
 void Llm::response(MNN::Express::VARP input_embeds, std::ostream* os, const char* end_with, int max_new_tokens) {
+    MNN::Express::ExecutorScope s(mExecutor);
     if (!end_with) { end_with = "\n"; }
     generate_init(os, end_with);
     generate(input_embeds, max_new_tokens);
 }
 
 void Llm::response(const std::string& user_content, std::ostream* os, const char* end_with, int max_new_tokens) {
+    MNN::Express::ExecutorScope s(mExecutor);
     auto prompt = user_content;
     if (mConfig->use_template()) {
         prompt = mPrompt->applyTemplate(user_content, true);
@@ -932,6 +946,7 @@ void Llm::response(const std::string& user_content, std::ostream* os, const char
 }
 
 void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const char* end_with, int max_new_tokens) {
+    MNN::Express::ExecutorScope s(mExecutor);
     if (chat_prompts.empty()) {
         return;
     }
@@ -941,6 +956,8 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
 }
 
 Llm::Llm(std::shared_ptr<LlmConfig> config) : mConfig(config) {
+    MNN::BackendConfig backendConfig;
+    mExecutor = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, backendConfig, 1);
     mContext.reset(new LlmContext);
     mMeta.reset(new KVMeta);
     mMeta->layer_nums = mConfig->layer_nums();
@@ -957,6 +974,7 @@ Llm::~Llm() {
     mModule.reset();
     mRuntimeManager.reset();
     mProcessorRuntimeManager.reset();
+    mExecutor.reset();
 }
 int Llm::getOutputIndex(const std::string& name) const {
     if (mModulePool.empty()) {
@@ -1013,6 +1031,7 @@ static inline bool needNewVar(VARP var, int axis, int seq_len, int kv_seq_len = 
 }
 
 VARP Llm::embedding(const std::vector<int>& input_ids) {
+    MNN::Express::ExecutorScope s(mExecutor);
     AUTOTIME;
     int hidden_size = mConfig->hidden_size();
     int seq_len = static_cast<int>(input_ids.size());
@@ -1034,6 +1053,7 @@ std::string Llm::tokenizer_decode(int id) {
 }
 
 VARP Llm::gen_attention_mask(int seq_len) {
+    MNN::Express::ExecutorScope s(mExecutor);
     int kv_seq_len = mContext->all_seq_len + seq_len;
     if (mConfig->attention_mask() == "float") {
         // full and sliding mix, using normal mask
@@ -1082,11 +1102,11 @@ VARP Llm::gen_attention_mask(int seq_len) {
         }
 
         // Mask: lower triangular
-        if (mConfig->backend_type() == "cpu") { // Now only cpu supports using lower triangular to opt the attention performance
-            attentionMask = _Input({}, NCHW, halide_type_of<float>());
-            auto ptr = attentionMask->writeMap<float>();
-            ptr[0] = 0;
-        } else {
+       if (mConfig->backend_type() == "cpu" && mValidBlockSize.empty()) { // Now only cpu supports using lower triangular to opt the attention performance
+           attentionMask = _Input({}, NCHW, halide_type_of<float>());
+           auto ptr = attentionMask->writeMap<float>();
+           ptr[0] = 0;
+       } else {
             attentionMask = _Input({1, 1, seq_len, kv_seq_len}, NCHW, halide_type_of<float>());
             auto ptr = attentionMask->writeMap<float>();
             for (int i = 0; i < seq_len; i++) {
@@ -1094,7 +1114,7 @@ VARP Llm::gen_attention_mask(int seq_len) {
                     ptr[kv_seq_len * i + j] = (j > i) * std::numeric_limits<float>::lowest();
                 }
             }
-        }
+       }
         return attentionMask;
     } else {
         if (needNewVar(attentionMask, 2, seq_len, kv_seq_len)) {
@@ -1127,6 +1147,7 @@ VARP Llm::gen_attention_mask(int seq_len) {
 }
 
 VARP Llm::gen_position_ids(int seq_len) {
+    MNN::Express::ExecutorScope s(mExecutor);
     if (mConfig->attention_mask() == "glm") {
         // chatglm
         if (needNewVar(positionIds, 2, seq_len)) {

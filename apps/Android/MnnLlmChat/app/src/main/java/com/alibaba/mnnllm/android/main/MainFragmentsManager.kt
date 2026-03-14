@@ -19,12 +19,14 @@ import com.alibaba.mnnllm.android.widgets.BottomTabBar
  * @param containerId The ID of the container where fragments will be placed.
  * @param bottomNav The BottomTabBar view to control fragment switching.
  * @param listener A listener to communicate UI update events back to the activity.
+ * @param modelListChangeListener Optional listener for model list changes (e.g. model deleted); activity uses it to notify ModelMarketFragment.
  */
 class MainFragmentManager(
     private val activity: AppCompatActivity,
     private val containerId: Int,
     private val bottomNav: BottomTabBar,
-    private val listener: FragmentLifecycleListener
+    private val listener: FragmentLifecycleListener,
+    private val modelListChangeListener: com.alibaba.mnnllm.android.modelist.OnModelListChangeListener? = null
 ) {
     private var modelListFragment: ModelListFragment? = null
     private var modelMarketFragment: ModelMarketFragment? = null
@@ -88,6 +90,7 @@ class MainFragmentManager(
         }
 
         setupTabListener()
+        modelListFragment?.onModelListChangeListener = modelListChangeListener
         val initialTab = getTabForFragment(activeFragment)
         // Keep processLastTab in sync so that any subsequent recreation within this
         // process (e.g. another launcher tap) also lands on the correct tab.
@@ -149,6 +152,13 @@ class MainFragmentManager(
             is ChatServerFragment -> BottomTabBar.Tab.CHAT_SERVER
             else -> BottomTabBar.Tab.LOCAL_MODELS
         }
+    }
+
+    /**
+     * Notify ModelMarketFragment that the set of downloaded models has changed (e.g. after delete in ModelListFragment).
+     */
+    fun notifyModelMarketDownloadedModelsChanged() {
+        modelMarketFragment?.onDownloadedModelsChanged()
     }
 
     companion object {
