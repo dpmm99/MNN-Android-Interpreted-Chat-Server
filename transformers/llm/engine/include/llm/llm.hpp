@@ -101,12 +101,17 @@ struct LlmContext {
     bool json_in_string = false;     // true when inside a JSON string
     int json_bracket_depth = 0;      // Nesting depth for { and [
     bool json_complete = false;      // true when JSON is complete (all brackets closed)
-    
+    int ff_value_start_pos = 0;
+
     // JSON Schema support
     std::shared_ptr<JsonSchemaParser> json_schema;  // Schema parser (nullptr = basic JSON mode)
     std::string json_schema_string;  // Original schema JSON string
     std::vector<std::string> expected_keys;  // Keys expected at current level
     std::vector<std::string> generated_keys;  // Keys generated so far at current level
+    mutable std::vector<int> fast_forward_tokens;  // Cached predictable tokens
+    mutable int fast_forward_index;  // Current position in fast_forward_tokens
+    mutable bool json_structure_computed;  // Whether structure has been pre-computed
+    mutable std::vector<int> json_structure_tokens;  // Pre-computed full JSON skeleton
     
     // Degenerate loop detection
     int recent_tokens[15] = {0};  // Circular buffer of last 15 tokens
@@ -162,6 +167,14 @@ public:
     void set_json_schema(const std::string& schema_json);  // Set JSON schema for constrained decoding
     bool has_json_schema() const;  // Check if schema is loaded
     void clear_json_schema();  // Clear schema and revert to basic JSON mode
+    
+    // Fast-forward optimization for JSON
+    int predict_next_json_token() const;  // Returns token ID if next token is predictable, -1 otherwise
+    bool can_fast_forward() const;  // Check if we're in a state where fast-forward is possible
+    std::vector<int> get_fast_forward_tokens() const;  // Get multiple predictable tokens at once
+    int get_fast_forward_count() const;  // Number of tokens that can be fast-forwarded
+    void compute_json_structure() const;  // Pre-compute JSON structure skeleton
+    
     // tokenier function
     bool is_stop(int token);
     std::string tokenizer_decode(int token);

@@ -1224,7 +1224,8 @@ void Llm::reset_json_state() {
     mContext->json_in_string = false;
     mContext->json_bracket_depth = 0;
     mContext->json_complete = false;
-    
+    mContext->ff_value_start_pos = 0;
+
     // Reset loop detection
     for (int i = 0; i < 15; i++) {
         mContext->recent_tokens[i] = 0;
@@ -1235,6 +1236,14 @@ void Llm::reset_json_state() {
     // Clear schema tracking
     mContext->expected_keys.clear();
     mContext->generated_keys.clear();
+    
+    // Clear fast-forward cache
+    mContext->fast_forward_tokens.clear();
+    mContext->fast_forward_index = 0;
+    
+    // Clear pre-computed structure
+    mContext->json_structure_computed = false;
+    mContext->json_structure_tokens.clear();
 }
 
 void Llm::set_json_schema(const std::string& schema_json) {
@@ -1271,6 +1280,251 @@ void Llm::clear_json_schema() {
     mContext->expected_keys.clear();
     mContext->generated_keys.clear();
     // Keep json_mode enabled for basic JSON constraint
+}
+
+// Predict next token in JSON mode without LLM inference
+int Llm::predict_next_json_token() const {
+    if (!mContext->json_mode) {
+        return -1;
+    }
+    
+    const std::string& gen_str = mContext->generate_str;
+    if (gen_str.empty()) {
+        return -1;  // Let LLM generate opening '{'
+    }
+    
+    // Find last non-whitespace character
+    char last_char = 0;
+    for (auto it = gen_str.rbegin(); it != gen_str.rend(); ++it) {
+        if (!std::isspace(*it)) {
+            last_char = *it;
+            break;
+        }
+    }
+    
+    // Count quotes to determine if we're in a string
+    int quote_count = 0;
+    for (size_t i = 0; i < gen_str.size(); i++) {
+        if (gen_str[i] == '"' && (i == 0 || gen_str[i-1] != '\\')) {
+            quote_count++;
+        }
+    }
+    bool in_string = (quote_count % 2 == 1);
+    
+    // If we just closed a string (even quote count, last char was ")
+    if (!in_string && last_char == '"') {
+        // Next must be ':' - this is PREDICTABLE
+        if (mTokenizer) {
+            auto tokens = mTokenizer->encode(":");
+            if (!tokens.empty()) {
+                MNN_PRINT("Fast-forward: predicting ':' after string\n");
+                return tokens[0];
+            }
+        }
+    }
+    
+    // If we just had ':' 
+    if (last_char == ':') {
+        // Next should be '"' for string values - PREDICTABLE if schema says string
+        if (mContext->json_schema && mContext->json_schema->is_loaded()) {
+            // Could check schema here for type
+        }
+        // For now, let LLM decide value type
+    }
+    
+    // If we just closed a value (not in string, last char not special)
+    if (!in_string && last_char != ':' && last_char != '{' && last_char != ',' && 
+        last_char != '[' && last_char != '}') {
+        // Check if we need ',' or '}'
+        // Count bracket depth
+        int open_braces = 0, close_braces = 0;
+        for (char c : gen_str) {
+            if (c == '{') open_braces++;
+            if (c == '}') close_braces++;
+        }
+        
+        // If brackets are balanced, JSON is complete
+        if (open_braces == close_braces && open_braces > 0) {
+            // Don't predict - let model stop naturally
+            return -1;
+        }
+        
+        // Otherwise next is ',' or '}' - let LLM decide based on schema
+    }
+    
+    // After ',' in object, next key starts with '"' - PREDICTABLE
+    if (last_char == ',' && !in_string) {
+        if (mTokenizer) {
+            auto tokens = mTokenizer->encode("\"");
+            if (!tokens.empty()) {
+                MNN_PRINT("Fast-forward: predicting '\"' after ','\n");
+                return tokens[0];
+            }
+        }
+    }
+    
+    return -1;  // Let LLM sample normally
+}
+
+bool Llm::can_fast_forward() const {
+    return !get_fast_forward_tokens().empty();
+}
+
+int Llm::get_fast_forward_count() const {
+    return get_fast_forward_tokens().size();
+}
+
+void Llm::compute_json_structure() const {
+    if (mContext->json_structure_computed) return;
+    mContext->json_structure_computed = true;
+    mContext->json_structure_tokens.clear();
+
+    if (!mContext->json_schema || !mContext->json_schema->is_loaded()) return;
+    const JsonSchemaNode* root = mContext->json_schema->root();
+    if (!root) return;
+
+    const auto& props = root->properties();
+    auto required = root->required_properties();
+
+    bool all_required = (required.size() == props.size());
+    if (all_required) {
+        for (const auto& prop : props) {
+            bool found = false;
+            for (const auto& req : required)
+                if (req == prop.name) { found = true; break; }
+            if (!found) { all_required = false; break; }
+        }
+    }
+    MNN_PRINT("JSON FF: %zu properties, all_required=%d\n",
+        props.size(), (int)all_required);
+}
+
+std::vector<int> Llm::get_fast_forward_tokens() const {
+    std::vector<int> tokens;
+    if (!mContext->json_mode || !mTokenizer) return tokens;
+
+    if (mContext->json_schema && mContext->json_schema->is_loaded() &&
+        !mContext->json_structure_computed)
+        compute_json_structure();
+
+    bool has_schema = mContext->json_schema &&
+        mContext->json_schema->is_loaded() &&
+        mContext->json_schema->root() &&
+        !mContext->json_schema->root()->properties().empty();
+
+    // Virtual generation string containing the imminent current_token ensuring accuracy
+    std::string gen = mContext->generate_str;
+    if (mContext->current_token >= 0 && mTokenizer) {
+        gen += mTokenizer->decode(mContext->current_token);
+    }
+
+    if (!has_schema) {
+        if (mContext->generate_str.empty()) {
+            std::string full = "{\"";
+            std::string s = full;
+            for (int strip = (int)gen.size(); strip > 0; --strip) {
+                if (strip <= (int)full.size() && full.substr(0, strip) == gen.substr(gen.size() - strip)) {
+                    s = full.substr(strip);
+                    break;
+                }
+            }
+            if (!s.empty()) {
+                tokens = mTokenizer->encode(s);
+            }
+        }
+        return tokens;
+    }
+
+    const auto& props = mContext->json_schema->root()->properties();
+    const int   N = static_cast<int>(props.size());
+
+    int& ff_phase = mContext->fast_forward_index;  // 0 by reset_json_state
+
+    // ---- Odd phase: waiting for LLM to finish writing a value ------------
+    if (ff_phase % 2 == 1) {
+        int boundary = mContext->ff_value_start_pos;
+
+        // No new characters since the burst completed
+        if ((int)gen.size() <= boundary) return tokens;
+
+        std::string tail;
+        for (int k = (int)gen.size() - 1; k >= boundary && tail.size() < 4; --k) {
+            if (!std::isspace(static_cast<unsigned char>(gen[k])))
+                tail = gen[k] + tail;
+        }
+
+        bool value_closed = !tail.empty() && (
+            tail.back() == '"' ||
+            tail.back() == ',' ||
+            tail.back() == '}'
+            );
+
+        if (!value_closed) return tokens;  // value still open
+
+        ff_phase += 1;
+        MNN_PRINT("JSON FF: value %d closed (tail=\"%s\") → phase %d\n",
+            ff_phase / 2 - 1, tail.c_str(), ff_phase);
+    }
+
+    // ---- Even phase: emit structural tokens for key[i] -------------------
+    int i = ff_phase / 2;
+    if (i > N) return tokens;
+
+    std::string already;
+    {
+        for (int k = (int)gen.size() - 1; k >= mContext->ff_value_start_pos; --k) {
+            if (!std::isspace(static_cast<unsigned char>(gen[k])))
+                already = gen[k] + already;
+        }
+    }
+
+    if (i == N || (!already.empty() && already.back() == '}')) {
+        // All pairs done (either by schema count or LLM closed early).
+        // Only emit '}' if the LLM hasn't already written it.
+        if (already.empty() || already.back() != '}') {
+            tokens = mTokenizer->encode("}");
+            MNN_PRINT("JSON FF: phase %d → closing '}' (%zu token(s))\n",
+                ff_phase, tokens.size());
+        }
+        else {
+            MNN_PRINT("JSON FF: phase %d → LLM already wrote '}', nothing to emit\n",
+                ff_phase);
+        }
+        ff_phase = 2 * N + 2;
+        mContext->fast_forward_tokens = tokens;
+        return tokens;
+    }
+
+    std::string full = (i == 0)
+        ? "{\"" + props[i].name + "\":\""
+        : ",\"" + props[i].name + "\":\"";
+
+    std::string s = full;
+    for (int strip = (int)already.size(); strip > 0; --strip) {
+        if (strip <= (int)full.size() && full.substr(0, strip) == already.substr(already.size() - strip)) {
+            s = full.substr(strip);
+            MNN_PRINT("JSON FF: stripping %d already-written char(s) from burst\n", strip);
+            break;
+        }
+    }
+
+    if (s.empty()) {
+        // Everything in the structural prefix was already written by the LLM.
+        ff_phase = 2 * i + 1;
+        mContext->fast_forward_tokens.clear();
+        MNN_PRINT("JSON FF: phase %d → full prefix already written, deferring to LLM\n",
+            2 * i);
+        return tokens;
+    }
+
+    tokens = mTokenizer->encode(s);
+    MNN_PRINT("JSON FF: phase %d → \"%s\" (%zu token(s))\n",
+        ff_phase, s.c_str(), tokens.size());
+
+    ff_phase = 2 * i + 1;
+
+    mContext->fast_forward_tokens = tokens;
+    return tokens;
 }
 
 } // namespace Transformer

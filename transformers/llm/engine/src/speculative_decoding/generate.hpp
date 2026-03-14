@@ -47,6 +47,10 @@ public:
     ArGeneration(Llm* llm, std::shared_ptr<LlmContext> context, std::shared_ptr<LlmConfig> config);
     virtual ~ArGeneration() = default;
     virtual void generate(GenerationParams& param);
+private:
+    bool fastForwardStep(GenerationParams& param, int& len, int& ff_total_skipped);
+    void emitToken(int token);
+    void emitAndCommitToken(int token, bool updateKV);
 };
 
 class LookaheadGeneration: public Generation {
